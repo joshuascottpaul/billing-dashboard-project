@@ -29,3 +29,9 @@ npm-debug.log*
 # Temporary files
 *.tmp
 *.temp
+
+# Data files (may contain sensitive information)
+*.xlsx
+*.xls
+*.csv
+!analysis/out/*.csv
