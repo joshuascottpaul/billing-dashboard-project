@@ -1,7 +1,7 @@
 # TASKS (Generated)
 
 Source of truth: `tasks.yaml`
-Last generated: 2026-03-10
+Last generated: 2026-03-11
 
 ## T-001: Define baseline DORA instrumentation
 - Owner: orchestrator-agent
@@ -48,7 +48,7 @@ Last generated: 2026-03-10
 - Owner: homebrew-agent
 - Reviewer: release-agent
 - Priority: P0
-- Status: todo
+- Status: done
 - Depends on: T-002
 - Release Impact: homebrew
 - Inputs: RELEASE.md, Formula/<formula>.rb

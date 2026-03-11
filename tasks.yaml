@@ -114,7 +114,7 @@ tasks:
     title: "Automate Homebrew tap update on release"
     owner: "homebrew-agent"
     reviewer: "release-agent"
-    status: "todo"
+    status: "done"
     priority: "P0"
     depends_on: ["T-002"]
     inputs:
