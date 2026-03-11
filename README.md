@@ -35,6 +35,9 @@ open http://localhost:8000/dashboard/
 git clone https://github.com/joshuascottpaul/billing-dashboard-project.git
 cd billing-dashboard-project
 
+# Use sample data (included)
+cp nc-2002-2026-sample.xlsx nc-2002-2026.xlsx
+
 # Run analytics pipeline
 bash analysis/run.sh
 
@@ -191,7 +194,15 @@ nc-2002-2026.xlsx (source)
 - `Currency`
 - `Billing Country`
 
-**Data file:** `nc-2002-2026.xlsx` (not included in repository - contains sensitive billing data)
+**Data file:** `nc-2002-2026.xlsx` (not included - contains sensitive billing data)
+
+**Sample data:** `nc-2002-2026-sample.xlsx` (included - 5000 rows of fake data for testing)
+
+```bash
+# Use sample data (included in repo)
+cp nc-2002-2026-sample.xlsx nc-2002-2026.xlsx
+bash analysis/run.sh
+```
 
 See `analysis/README.md` for full schema documentation.
 
