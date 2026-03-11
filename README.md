@@ -191,6 +191,8 @@ nc-2002-2026.xlsx (source)
 - `Currency`
 - `Billing Country`
 
+**Data file:** `nc-2002-2026.xlsx` (not included in repository - contains sensitive billing data)
+
 See `analysis/README.md` for full schema documentation.
 
 ---
