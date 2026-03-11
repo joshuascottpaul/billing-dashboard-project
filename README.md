@@ -89,6 +89,30 @@ open dashboard/index.html
 
 ---
 
+## Screenshots
+
+### Default Overview
+
+![Default Overview](docs/screenshots/01-default-overview.png)
+
+### KPI Cards
+
+![KPI Cards](docs/screenshots/02-kpi-cards.png)
+
+### Charts Grid
+
+![Charts Grid](docs/screenshots/03-charts-grid.png)
+
+### Collections Risk View
+
+![Collections View](docs/screenshots/04-collections-view.png)
+
+### Customer Drill-Down
+
+![Customer Drilldown](docs/screenshots/05-customer-drilldown.png)
+
+---
+
 ## Installation
 
 ### Homebrew (macOS/Linux)

@@ -36,3 +36,12 @@ npm-debug.log*
 *.csv
 !analysis/out/*.csv
 !*-sample.xlsx
+
+# Screenshots
+!docs/screenshots/*.png
+
+# Test artifacts
+playwright-report/
+test-results/
+dashboard/tests/screenshots/
+analysis/tmp/
