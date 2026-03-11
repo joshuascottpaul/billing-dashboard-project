@@ -18,7 +18,8 @@
 brew tap joshuascottpaul/homebrew-tap
 brew install billing-dashboard
 
-# Run analytics
+# Run analytics with sample data
+cp $(brew --prefix billing-dashboard)/libexec/nc-2002-2026-sample.xlsx nc-2002-2026.xlsx
 billing-dashboard run
 
 # Start dashboard server
@@ -28,14 +29,14 @@ billing-dashboard serve
 open http://localhost:8000/dashboard/
 ```
 
-### Option 2: From Source
+### Option 2: From Source (Try with Sample Data)
 
 ```bash
 # Clone repository
 git clone https://github.com/joshuascottpaul/billing-dashboard-project.git
 cd billing-dashboard-project
 
-# Use sample data (included)
+# Copy sample data (included in repo)
 cp nc-2002-2026-sample.xlsx nc-2002-2026.xlsx
 
 # Run analytics pipeline
@@ -171,40 +172,79 @@ http://localhost:8000/dashboard/?yf=2024&yt=2025&fy=2025&n=10&fc=0&cm=0
 
 ---
 
-## Data Flow
+## Data Files
 
+### Sample Data (Included)
+
+**File:** `nc-2002-2026-sample.xlsx`
+
+- **5,000 rows** of fake billing data
+- **Date range:** 2024-01-01 to 2026-02-28
+- **Safe to share** - no sensitive information
+- **Same schema** as production data
+
+```bash
+# Use sample data (recommended for testing)
+cp nc-2002-2026-sample.xlsx nc-2002-2026.xlsx
+bash analysis/run.sh
 ```
-nc-2002-2026.xlsx (source)
-         ↓
-  analysis/tmp/ (intermediate)
-         ↓
-   analysis/out/ (CSV outputs)
-         ↓
-  dashboard/index.html (visualization)
+
+### Production Data (Not Included)
+
+**File:** `nc-2002-2026.xlsx`
+
+- Your actual billing data exported from accounting system
+- **NOT included** in repository (contains sensitive data)
+- Must match the required schema
+
+```bash
+# Use your production data
+# 1. Export billing data to nc-2002-2026.xlsx
+# 2. Ensure required columns match schema
+# 3. Run analytics
+bash analysis/run.sh
 ```
 
 ### Source Schema
 
 **Required columns:**
-- `Invoice Date`
-- `Statement Item Type`
-- `Invoice Grand Total`
-- `Amount of Payment`
-- `Billing Company` / `Billing Contact` / `Billing Contact Address Email`
-- `Currency`
-- `Billing Country`
 
-**Data file:** `nc-2002-2026.xlsx` (not included - contains sensitive billing data)
+| Column | Description | Example |
+|--------|-------------|---------|
+| `Invoice Date` | Event date for all transactions | `2025-03-15 10:30:00` |
+| `Statement Item Type` | Transaction class | `Invoice`, `Payment`, `Credit` |
+| `Invoice Grand Total` | Invoice/credit amount | `1500.00` |
+| `Amount of Payment` | Payment amount | `1500.00` |
+| `Billing Company` | Primary customer identity | `Acme Corporation` |
+| `Billing Contact` | Fallback customer identity | `John Doe` |
+| `Billing Contact Address Email` | Final fallback identity | `billing@acme.com` |
+| `Currency` | Currency code | `CAD`, `USD`, `EUR` |
+| `Billing Country` | Country code | `CA`, `US`, `GB` |
 
-**Sample data:** `nc-2002-2026-sample.xlsx` (included - 5000 rows of fake data for testing)
+**Optional columns:**
+- `Payment Method`
+- `Work Order Number`
+- `Tax GST`
+- `Sub Total`
+- `Total Invoice`
+- `Total of Payments`
+- `Total Outstanding`
 
-```bash
-# Use sample data (included in repo)
-cp nc-2002-2026-sample.xlsx nc-2002-2026.xlsx
-bash analysis/run.sh
+See `analysis/README.md` for full schema documentation and remediation steps.
+
+---
+
+## Data Flow
+
 ```
-
-See `analysis/README.md` for full schema documentation.
+nc-2002-2026.xlsx (source - your data or sample)
+         ↓
+  analysis/tmp/ (intermediate files)
+         ↓
+   analysis/out/ (23 CSV outputs)
+         ↓
+  dashboard/index.html (visualization)
+```
 
 ---
 
@@ -293,6 +333,16 @@ python3 -m http.server 8000
 open http://localhost:8000/dashboard/
 ```
 
+### Q: How do I try the dashboard with sample data?
+
+**A:** Copy the included sample file and run:
+
+```bash
+cp nc-2002-2026-sample.xlsx nc-2002-2026.xlsx
+bash analysis/run.sh
+open dashboard/index.html
+```
+
 ### Q: Schema validation fails
 
 **A:** Check that your Excel file has all required columns. Run:
@@ -345,7 +395,7 @@ bash analysis/run.sh
 
 ### Q: How do I add new metrics?
 
-**A:** 
+**A:**
 1. Add SQL in `analysis/03_metrics.sql` or `04_advanced_analysis.sql`
 2. Add export in `analysis/run.sh`
 3. Update `dashboard/index.html` to read new CSV
