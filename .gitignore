@@ -35,3 +35,4 @@ npm-debug.log*
 *.xls
 *.csv
 !analysis/out/*.csv
+!*-sample.xlsx
