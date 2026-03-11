@@ -1,0 +1,1431 @@
+<!--
+How to run:
+1) bash analysis/run.sh
+2) open dashboard/index.html
+
+Assumptions:
+- CSV files exist under ../analysis/out/ and follow the current generated schema.
+- If your browser blocks file:// fetch, run a local static server from repo root:
+  python3 -m http.server 8000
+  then open http://localhost:8000/dashboard/
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Billing Intelligence Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <style>
+    .table-shell { max-height: 24rem; overflow: auto; }
+    .sticky-head th { position: sticky; top: 0; z-index: 1; }
+    .kpi-badge { border: 1px solid rgba(15,23,42,.08); }
+    .kpi-accent-green  { box-shadow: inset 3px 0 0 #10b981, 0 1px 3px rgba(15,23,42,.08); }
+    .kpi-accent-red    { box-shadow: inset 3px 0 0 #f43f5e, 0 1px 3px rgba(15,23,42,.08); }
+    .kpi-accent-amber  { box-shadow: inset 3px 0 0 #f59e0b, 0 1px 3px rgba(15,23,42,.08); }
+    .kpi-accent-cyan   { box-shadow: inset 3px 0 0 #0891b2, 0 1px 3px rgba(15,23,42,.08); }
+    .kpi-accent-slate  { box-shadow: inset 3px 0 0 #94a3b8, 0 1px 3px rgba(15,23,42,.08); }
+    .badge { display:inline-flex; align-items:center; padding:.125rem .4rem; border-radius:.3rem; font-size:.7rem; font-weight:600; line-height:1.4; letter-spacing:.01em; }
+    .resizable-table tbody tr:hover { background: #f8fafc; }
+    .panel { border: 1px solid rgba(15,23,42,.08); box-shadow: 0 2px 6px rgba(15,23,42,.06); }
+    .mono { font-variant-numeric: tabular-nums; }
+    .help-wrap { position: relative; display: inline-flex; align-items: center; gap: 0.35rem; }
+    .help-dot { width: 1rem; height: 1rem; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: 700; border: 1px solid rgba(15,23,42,.25); color: #334155; background: #f8fafc; cursor: help; }
+    .help-tip { position: absolute; left: 0; top: 1.4rem; width: 21rem; max-width: 85vw; background: #0f172a; color: #e2e8f0; font-size: 0.72rem; line-height: 1.25; border-radius: 0.45rem; padding: 0.5rem 0.6rem; box-shadow: 0 8px 20px rgba(2,6,23,.35); opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .15s ease, transform .15s ease; z-index: 20; }
+    .help-wrap:hover .help-tip { opacity: 1; transform: translateY(0); }
+    .help-wrap:focus-within .help-tip, .help-wrap.open .help-tip { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    .sort-th { cursor: pointer; user-select: none; position: relative; }
+    .sort-th:hover { background: #e2e8f0; }
+    .col-resize-handle { position: absolute; top: 0; right: -6px; width: 14px; height: 100%; cursor: col-resize; z-index: 5; touch-action: none; }
+    .col-resize-handle:hover { background: rgba(2,132,199,.2); }
+    .col-resize-handle::after { content: ""; position: absolute; right: 6px; top: 20%; bottom: 20%; width: 2px; background: rgba(100,116,139,.45); border-radius: 9999px; }
+    .resizable-table { table-layout: fixed; width: max-content; min-width: 100%; }
+    .drawer { transition: transform .2s ease; }
+    .customer-link { color: #0f766e; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+    .panel-managed { position: relative; }
+    .panel-controls { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.5rem; }
+    .panel-btn { font-size: 0.7rem; line-height: 1; border: 1px solid #cbd5e1; border-radius: 0.35rem; padding: 0.25rem 0.35rem; background: #fff; color: #334155; }
+    .panel-btn:hover { background: #f1f5f9; }
+    .panel-btn.active { border-color: #0f172a; background: #0f172a; color: #fff; }
+    .panel-managed.panel-collapsed > :not(:first-child) { display: none !important; }
+    .panel-focus-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.45); z-index: 55; display: none; }
+    .panel-focus-backdrop.show { display: block; }
+    .panel-managed.panel-focused {
+      position: fixed !important;
+      z-index: 60;
+      top: 4vh;
+      left: 3vw;
+      width: 94vw;
+      height: 92vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 24px 60px rgba(2, 6, 23, 0.35);
+    }
+    .panel-managed.panel-focused > :first-child { flex: 0 0 auto; }
+    .panel-managed.panel-focused > :not(:first-child) { flex: 1 1 auto; min-height: 0; }
+    .panel-managed.panel-focused [id$="Table"] { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+    .panel-managed.panel-focused [id$="Table"] > .table-shell { flex: 1 1 auto; max-height: none; height: 100%; min-height: 0; }
+    .panel-managed.panel-focused canvas { height: min(68vh, 900px) !important; }
+    .panel-managed.panel-pinned { grid-column: 1 / -1; }
+    .panel-managed.panel-pinned canvas { height: min(46vh, 620px) !important; }
+    body.panel-focus-open { overflow: hidden; }
+    body.resizing, body.resizing * { cursor: col-resize !important; user-select: none !important; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="min-h-screen">
+    <header class="bg-gradient-to-r from-teal-700 via-cyan-700 to-sky-700 text-white">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+        <p class="uppercase tracking-[0.2em] text-xs text-cyan-100">Billing and Collections Analytics</p>
+        <h1 class="text-2xl sm:text-4xl font-bold mt-1 tracking-tight">Financial Health Dashboard</h1>
+        <div class="mt-2 flex flex-wrap items-center gap-3 text-sm">
+          <p class="text-cyan-100">Source: <code class="bg-white/15 px-2 py-0.5 rounded">analysis/out/*.csv</code></p>
+          <span id="dataFreshness" class="px-2 py-0.5 rounded bg-white/15 text-cyan-50"></span>
+        </div>
+        <p id="lastLoaded" class="mt-3 text-xs text-cyan-100"></p>
+      </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      <section id="errorBox" class="hidden mb-6 rounded-lg border border-red-200 bg-red-50 text-red-800 px-4 py-3"></section>
+
+      <section class="panel rounded-xl bg-white p-3 mb-6">
+        <div class="flex flex-wrap items-center gap-2" role="tablist" aria-label="Dashboard views">
+          <button id="tabFocusDashboard" role="tab" aria-controls="focusDashboardRegion" type="button" class="px-3 py-1.5 rounded border border-slate-300 bg-slate-900 text-white text-sm" aria-selected="true">
+            <span aria-hidden="true">◎</span>
+            Focus-Year Dashboard
+          </button>
+          <button id="tabDateDashboard" role="tab" aria-controls="dateDashboardRegion" type="button" class="px-3 py-1.5 rounded border border-slate-300 bg-white text-slate-700 text-sm" aria-selected="false">
+            <span aria-hidden="true">▦</span>
+            Date-Range Dashboard
+          </button>
+        </div>
+      </section>
+
+      <section class="panel rounded-xl bg-white p-4 mb-6">
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div id="dateDashboardRegion" role="tabpanel" aria-labelledby="tabDateDashboard" class="rounded-lg border border-slate-200 bg-slate-50 p-3" data-dashboard-scope="date">
+            <p class="text-[11px] uppercase tracking-[0.14em] text-slate-500 mb-2">Date Range Scope</p>
+            <div class="flex flex-wrap items-end gap-3">
+              <div>
+                <label for="yearFrom" class="block text-xs text-slate-600 mb-1">Year from</label>
+                <select id="yearFrom" class="px-3 py-2 rounded border border-slate-300 min-w-24"></select>
+              </div>
+              <div>
+                <label for="yearTo" class="block text-xs text-slate-600 mb-1">Year to</label>
+                <select id="yearTo" class="px-3 py-2 rounded border border-slate-300 min-w-24"></select>
+              </div>
+            </div>
+          </div>
+          <div id="focusDashboardRegion" role="tabpanel" aria-labelledby="tabFocusDashboard" class="rounded-lg border border-slate-200 bg-cyan-50 p-3" data-dashboard-scope="focus">
+            <p class="text-[11px] uppercase tracking-[0.14em] text-cyan-800 mb-2">Focus-Year Dashboard Scope</p>
+            <p class="text-xs text-cyan-900/80 mb-2">Focus year is independent from Year from/Year to.</p>
+            <div class="flex flex-wrap items-end gap-3">
+              <div>
+                <label for="focusYear" class="block text-xs text-slate-600 mb-1">Focus year</label>
+                <select id="focusYear" class="px-3 py-2 rounded border border-slate-300 min-w-24"></select>
+              </div>
+              <div>
+                <label for="topN" class="block text-xs text-slate-600 mb-1">Top N</label>
+                <select id="topN" class="px-3 py-2 rounded border border-slate-300 min-w-24">
+                  <option value="5">5</option>
+                  <option value="8">8</option>
+                  <option value="10">10</option>
+                  <option value="15">15</option>
+                  <option value="20">20</option>
+                </select>
+              </div>
+              <label class="inline-flex items-center gap-2 px-3 py-2 rounded border border-slate-300 bg-white">
+                <input id="includeForecast" type="checkbox" checked>
+                <span class="text-sm">Include forecast</span>
+              </label>
+              <label class="inline-flex items-center gap-2 px-3 py-2 rounded border border-slate-300 bg-white">
+                <input id="compareMode" type="checkbox">
+                <span class="text-sm">Compare vs prior year</span>
+              </label>
+              <div>
+                <label for="viewPreset" class="block text-xs text-slate-600 mb-1">Saved view</label>
+                <select id="viewPreset" class="px-3 py-2 rounded border border-slate-300 min-w-44">
+                  <option value="custom">Custom</option>
+                  <option value="default">Default overview</option>
+                  <option value="collections">Collections review</option>
+                  <option value="growth">Growth review</option>
+                  <option value="concentration">Concentration risk</option>
+                </select>
+              </div>
+              <button id="applyPreset" class="px-4 py-2 rounded border border-slate-300 bg-white"><span aria-hidden="true">✓</span> Apply view</button>
+            </div>
+          </div>
+        </div>
+        <div class="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+          <p class="text-[11px] uppercase tracking-[0.14em] text-slate-500 mb-2">Shared Filter</p>
+          <div class="flex flex-wrap items-end gap-3">
+            <div>
+              <label for="customerSelector" class="block text-xs text-slate-600 mb-1">Customer selector</label>
+              <input id="customerSelector" list="customerList" placeholder="All customers"
+                class="px-3 py-2 rounded border border-slate-300 min-w-56" />
+              <datalist id="customerList"></datalist>
+            </div>
+          </div>
+        </div>
+        <div class="mt-3 flex flex-wrap items-center gap-3">
+          <button id="resetFilters" class="px-4 py-2 rounded border border-slate-300"><span aria-hidden="true">↺</span> Reset filters</button>
+          <button id="downloadBundle" class="px-4 py-2 rounded border border-slate-300"><span aria-hidden="true">⇩</span> Download bundle (.zip)</button>
+          <button id="resetAllPrefs" class="px-4 py-2 rounded bg-slate-900 text-white"><span aria-hidden="true">⚙</span> Reset all preferences</button>
+        </div>
+        <div id="activeFilters" class="mt-3 flex flex-wrap gap-2 text-xs"></div>
+      </section>
+
+      <section class="panel rounded-xl bg-white p-4 mb-6" data-dashboard-scope="shared">
+        <div class="flex items-center justify-between gap-3">
+          <button id="toggleHelpDefs" type="button" class="inline-flex items-center gap-2 text-sm font-semibold text-slate-800" aria-expanded="false" aria-controls="helpDefsPanel">
+            <span aria-hidden="true">?</span>
+            <span id="helpDefsChevron" class="inline-block text-slate-500">▸</span>
+            <span>Help and Definitions</span>
+          </button>
+          <span class="text-xs text-slate-500">Mobile-friendly reference</span>
+        </div>
+        <div id="helpDefsPanel" class="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 text-xs text-slate-700 hidden">
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Top-1 Share:</strong> Percentage of annual invoice revenue coming from the largest customer in the focus year. Track this with Top-5 and Top-10 concentration. Persistent increases indicate dependency risk and potential volatility if one account slows or churns.<br><span class="text-slate-600"><strong>In simple terms:</strong> This shows how much you rely on your single biggest customer. If this keeps rising, your revenue is more exposed if that customer cuts spending.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Latest DSO:</strong> Days Sales Outstanding estimated from ending A/R versus rolling 3-month sales. This is a cash-conversion signal. Rising DSO can indicate slower customer payment behavior, disputes, or billing-to-collection process friction.<br><span class="text-slate-600"><strong>In simple terms:</strong> This is how long it takes to collect cash after invoicing. Higher numbers usually mean cash is coming in more slowly.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>High-Risk A/R:</strong> Count of customers flagged with large or dominant 90+ day aging balances in the latest snapshot. Use this as collections triage and pair with customer drill-down before escalation.<br><span class="text-slate-600"><strong>In simple terms:</strong> This is the number of customers with overdue balances that may be hard to collect. Use it as your priority follow-up list.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Yearly Invoices, Payments, Credits:</strong> Annual view of gross invoicing, cash-in, and credit adjustments. If payments trail invoices for multiple years or credits spike, investigate contract changes, credit policy, or collection timing.<br><span class="text-slate-600"><strong>In simple terms:</strong> Compare what you billed, what you collected, and what you credited each year to see if money collection is keeping up.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Monthly Invoices + Forecast:</strong> Historical monthly invoices with optional baseline forecast. Forecast is directional planning support, not a committed target. Interpret alongside anomalies and customer concentration shifts.<br><span class="text-slate-600"><strong>In simple terms:</strong> This shows monthly billing trends and a forward estimate to help planning, but it is a guide, not a promise.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Concentration (Top 1/5/10):</strong> Annual revenue share captured by largest customers. If these lines rise while total revenue is flat, risk concentration is increasing even without top-line decline.<br><span class="text-slate-600"><strong>In simple terms:</strong> This tells you how dependent you are on a small group of big customers. Rising values mean more concentration risk.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Invoice Drift:</strong> Median and upper percentiles (p75/p90/p95) show ticket-size distribution movement. Rising p95 with flat median generally suggests large-deal mix expansion rather than broad base pricing change.<br><span class="text-slate-600"><strong>In simple terms:</strong> This shows whether invoice sizes are changing across your customer base. Big movement at the top often means more large deals.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Retention and Churn:</strong> New, retained, reactivated, and churned customers by year. Growth quality usually improves when retained and reactivated contributions rise sustainably relative to churn.<br><span class="text-slate-600"><strong>In simple terms:</strong> This shows how well you keep customers, win them back, and replace losses. Healthy growth usually means strong retention and controlled churn.</span></div>
+          <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><strong>Unmatched Invoices:</strong> Reconciliation entries where unresolved balances remain under the matching model. Prioritize by amount and age; older unmatched balances are common indicators of dispute, process exception, or linkage gaps.<br><span class="text-slate-600"><strong>In simple terms:</strong> These are invoices that still do not tie out cleanly. Older and larger items should be resolved first because they often signal process or dispute issues.</span></div>
+        </div>
+      </section>
+
+      <section id="dataCoverage" class="panel rounded-xl bg-white p-4 mb-6" data-dashboard-scope="date"></section>
+
+      <section id="kpis" class="grid grid-cols-2 lg:grid-cols-6 gap-3 mb-6" data-dashboard-scope="focus"></section>
+
+      <section class="panel rounded-xl bg-white p-4 mb-6" data-dashboard-scope="focus">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <h2 class="text-sm font-semibold">
+            <span class="help-wrap">Top-N Customers Cross-Tab (Focus vs Prior Year)
+              <span class="help-dot">i</span>
+              <span class="help-tip">Ranks top N customers by focus-year sales, compares prior-year sales, and overlays YoY%. This chart always shows focus year and prior year (not the full year-range series). Green indicates expansion, red indicates contraction. Click a customer in chart or table to open drill-down details.</span>
+            </span>
+          </h2>
+          <div class="flex items-center gap-2">
+            <button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="topCustomersYoYChart">Chart CSV</button>
+            <button class="chart-png text-xs px-2 py-1 rounded border" data-chart="topCustomersYoYChart">PNG</button>
+          </div>
+        </div>
+        <canvas id="topCustomersYoYChart" height="120"></canvas>
+        <div class="mt-4">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-semibold">Top-N Cross-Tab Table</h3>
+            <button class="export-btn text-xs px-2 py-1 rounded border" data-table="topCrossTabTable">Export CSV</button>
+          </div>
+          <div id="topCrossTabTable"></div>
+        </div>
+      </section>
+
+      <section class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6">
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Yearly Invoices, Payments, Credits <span class="help-dot">i</span><span class="help-tip">Annual totals split by transaction type over selected year range.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="yearlyChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="yearlyChart">PNG</button></div></div>
+          <canvas id="yearlyChart" height="120"></canvas>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Monthly Invoices + Forecast <span class="help-dot">i</span><span class="help-tip">Monthly invoice trend with optional forecast projection.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="monthlyForecastChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="monthlyForecastChart">PNG</button></div></div>
+          <canvas id="monthlyForecastChart" height="120"></canvas>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Concentration by Year (Top 1/5/10) <span class="help-dot">i</span><span class="help-tip">Revenue concentration trend over selected year range.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="concentrationChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="concentrationChart">PNG</button></div></div>
+          <canvas id="concentrationChart" height="120"></canvas>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Invoice Drift Percentiles <span class="help-dot">i</span><span class="help-tip">Distribution shift in invoice amounts over selected year range.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="driftChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="driftChart">PNG</button></div></div>
+          <canvas id="driftChart" height="120"></canvas>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Retention and Churn Cohorts <span class="help-dot">i</span><span class="help-tip">Customer lifecycle counts by year.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="retentionChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="retentionChart">PNG</button></div></div>
+          <canvas id="retentionChart" height="120"></canvas>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Invoice Size Mix by Year <span class="help-dot">i</span><span class="help-tip">Revenue share by invoice size bucket by year.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="sizeMixChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="sizeMixChart">PNG</button></div></div>
+          <canvas id="sizeMixChart" height="120"></canvas>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="focus">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Currency Exposure (Focus Year) <span class="help-dot">i</span><span class="help-tip">Top currencies by focus-year invoice revenue share.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="currencyChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="currencyChart">PNG</button></div></div>
+          <canvas id="currencyChart" height="180"></canvas>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="focus">
+          <div class="flex items-center justify-between gap-2 mb-2"><h2 class="text-sm font-semibold"><span class="help-wrap">Country Exposure (Focus Year) <span class="help-dot">i</span><span class="help-tip">Top countries by focus-year invoice revenue share.</span></span></h2><div class="flex gap-2"><button class="chart-csv text-xs px-2 py-1 rounded border" data-chart="countryChart">Chart CSV</button><button class="chart-png text-xs px-2 py-1 rounded border" data-chart="countryChart">PNG</button></div></div>
+          <canvas id="countryChart" height="180"></canvas>
+        </div>
+      </section>
+
+      <section class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="focus">
+          <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-semibold">Top Customers (Focus Year)</h3><button class="export-btn text-xs px-2 py-1 rounded border" data-table="topCustomersTable">Export CSV</button></div>
+          <div id="topCustomersTable"></div>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="focus">
+          <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-semibold">Year-over-Year Delta (Focus vs Prior)</h3><button class="export-btn text-xs px-2 py-1 rounded border" data-table="deltaTable">Export CSV</button></div>
+          <div id="deltaTable"></div>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="focus">
+          <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-semibold">Collections Risk (Latest)</h3><button class="export-btn text-xs px-2 py-1 rounded border" data-table="collectionsTable">Export CSV</button></div>
+          <div id="collectionsTable"></div>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="focus">
+          <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-semibold">Payment Behavior Scorecard</h3><button class="export-btn text-xs px-2 py-1 rounded border" data-table="paymentTable">Export CSV</button></div>
+          <div id="paymentTable"></div>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-semibold">Unmatched Invoices</h3><button class="export-btn text-xs px-2 py-1 rounded border" data-table="reconTable">Export CSV</button></div>
+          <div id="reconTable"></div>
+        </div>
+        <div class="panel rounded-xl bg-white p-4" data-dashboard-scope="date">
+          <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-semibold"><span class="help-wrap">Recent Anomalies <span class="help-dot">i</span><span class="help-tip"><strong>Type definitions:</strong><br><strong>invoice_outlier:</strong> An invoice amount that is unusually high/low versus normal patterns.<br><strong>customer_month_spike:</strong> A customer's monthly billed amount jumped sharply versus their baseline.<br><strong>credit_burst:</strong> Credits/refunds increased unusually in a short period.<br><br><strong>Simple view:</strong> These flags highlight unusual billing events worth a quick business review.</span></span></h3><button class="export-btn text-xs px-2 py-1 rounded border" data-table="anomalyTable">Export CSV</button></div>
+          <div id="anomalyTable"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <aside id="customerDrawer" class="drawer fixed top-0 right-0 h-full w-full max-w-xl bg-white border-l border-slate-200 shadow-2xl translate-x-full z-40 overflow-auto">
+    <div class="p-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white">
+      <div>
+        <p class="text-xs text-slate-500">Customer drill-down</p>
+        <h2 id="drawerTitle" class="text-lg font-semibold"></h2>
+      </div>
+      <button id="closeDrawer" class="px-3 py-1 rounded border border-slate-300"><span aria-hidden="true">✕</span> Close</button>
+    </div>
+    <div class="p-4 space-y-4">
+      <div class="grid grid-cols-2 gap-3">
+        <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><div class="text-xs text-slate-500 uppercase tracking-wide mb-1">Focus year sales</div><div id="drawerFocusSales" class="mono text-xl font-bold text-slate-900 leading-tight"></div></div>
+        <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><div class="text-xs text-slate-500 uppercase tracking-wide mb-1">YoY change</div><div id="drawerYoY" class="mono text-xl font-bold leading-tight"></div></div>
+        <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><div class="text-xs text-slate-500 uppercase tracking-wide mb-1">Open balance</div><div id="drawerOpenBalance" class="mono text-xl font-bold text-slate-900 leading-tight"></div></div>
+        <div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><div class="text-xs text-slate-500 uppercase tracking-wide mb-1">Late share &gt;60d</div><div id="drawerLateShare" class="mono text-xl font-bold text-slate-900 leading-tight"></div></div>
+      </div>
+      <div class="panel rounded p-3"><h3 class="text-sm font-semibold mb-2">Customer Sales by Year</h3><canvas id="drawerSalesChart" height="120"></canvas></div>
+      <div class="panel rounded p-3"><h3 class="text-sm font-semibold mb-2">Recent anomalies</h3><div id="drawerAnomalies"></div></div>
+    </div>
+  </aside>
+  <div id="panelFocusBackdrop" class="panel-focus-backdrop" aria-hidden="true"></div>
+
+  <div id="loadingOverlay" class="fixed inset-0 bg-white flex flex-col items-center justify-center z-50">
+    <div class="w-10 h-10 border-4 border-cyan-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+    <p class="text-sm text-slate-500 font-medium">Loading dashboard data…</p>
+  </div>
+
+  <script type="module">
+    const CSV_BASE = "../analysis/out/";
+    const FILES = {
+      yearly: "yearly_summary.csv",
+      concentration: "concentration_by_year.csv",
+      drift: "invoice_drift.csv",
+      dso: "dso_monthly_overall.csv",
+      retention: "retention_cohorts.csv",
+      sizeMix: "invoice_size_mix_by_year.csv",
+      currency: "currency_exposure_by_year.csv",
+      country: "country_exposure_by_year.csv",
+      collections: "collections_risk_latest.csv",
+      payment: "payment_behavior_scorecard.csv",
+      anomalies: "anomalies_detected.csv",
+      forecast: "forecast_monthly_baseline.csv",
+      recon: "reconciliation_unmatched_invoices.csv",
+      reconYear: "reconciliation_customer_year.csv",
+    };
+
+    const STORAGE_KEYS = { filters: "billing_dashboard_filters_v3", tables: "billing_dashboard_tables_v2", panels: "billing_dashboard_panels_v1" };
+    const state = { yearFrom: null, yearTo: null, focusYear: null, customer: "", topN: 8, includeForecast: true, compareMode: false, viewPreset: "custom", viewTab: "focus" };
+    const tableUiState = {};
+    const visibleTables = {};
+    const charts = {};
+    let activeResize = null;
+    let lastResizeAt = 0;
+    let csvMeta = {};
+    let currentData = null;
+    let customerInputTimer = null;
+    const panelLayoutState = { collapsed: {}, pinned: null, focused: null };
+    let managedPanels = [];
+
+    const el = {
+      errorBox: document.getElementById("errorBox"),
+      lastLoaded: document.getElementById("lastLoaded"),
+      dataFreshness: document.getElementById("dataFreshness"),
+      kpis: document.getElementById("kpis"),
+      yearFrom: document.getElementById("yearFrom"),
+      yearTo: document.getElementById("yearTo"),
+      focusYear: document.getElementById("focusYear"),
+      customerSelector: document.getElementById("customerSelector"),
+      customerList: document.getElementById("customerList"),
+      topN: document.getElementById("topN"),
+      includeForecast: document.getElementById("includeForecast"),
+      compareMode: document.getElementById("compareMode"),
+      viewPreset: document.getElementById("viewPreset"),
+      applyPreset: document.getElementById("applyPreset"),
+      resetFilters: document.getElementById("resetFilters"),
+      resetAllPrefs: document.getElementById("resetAllPrefs"),
+      downloadBundle: document.getElementById("downloadBundle"),
+      activeFilters: document.getElementById("activeFilters"),
+      dataCoverage: document.getElementById("dataCoverage"),
+      drawer: document.getElementById("customerDrawer"),
+      drawerTitle: document.getElementById("drawerTitle"),
+      drawerFocusSales: document.getElementById("drawerFocusSales"),
+      drawerYoY: document.getElementById("drawerYoY"),
+      drawerOpenBalance: document.getElementById("drawerOpenBalance"),
+      drawerLateShare: document.getElementById("drawerLateShare"),
+      drawerAnomalies: document.getElementById("drawerAnomalies"),
+      closeDrawer: document.getElementById("closeDrawer"),
+      toggleHelpDefs: document.getElementById("toggleHelpDefs"),
+      helpDefsPanel: document.getElementById("helpDefsPanel"),
+      helpDefsChevron: document.getElementById("helpDefsChevron"),
+      tabFocusDashboard: document.getElementById("tabFocusDashboard"),
+      tabDateDashboard: document.getElementById("tabDateDashboard"),
+      panelFocusBackdrop: document.getElementById("panelFocusBackdrop"),
+    };
+
+    const fmtCurrency = (n) => n == null || Number.isNaN(n) ? "-" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+    const fmtPct = (n) => n == null || Number.isNaN(n) ? "-" : `${(n * 100).toFixed(1)}%`;
+    const fmtNum = (n, d = 1) => n == null || Number.isNaN(n) ? "-" : Number(n).toFixed(d);
+    const esc = (v) => String(v ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+    const toNum = (v) => {
+      if (v == null || v === "") return null;
+      const n = Number(String(v).replace(/,/g, ""));
+      return Number.isFinite(n) ? n : null;
+    };
+    const yearOf = (v) => {
+      if (!v) return null;
+      const y = Number(String(v).slice(0, 4));
+      return Number.isFinite(y) ? y : null;
+    };
+    const customerLink = (name) => `<button class="customer-link" data-customer="${esc(name)}">${esc(name)}</button>`;
+
+    function kpiToneForTop1(x) { if (x == null) return "slate"; if (x > 0.4) return "red"; if (x > 0.3) return "amber"; return "green"; }
+    function kpiToneForDSO(x) { if (x == null) return "slate"; if (x > 75) return "red"; if (x > 55) return "amber"; return "green"; }
+    function kpiToneForRisk(x) { if (x == null) return "slate"; if (x > 100) return "red"; if (x > 40) return "amber"; return "green"; }
+    function toneClass(tone) {
+      return {
+        slate: "bg-white kpi-accent-slate",
+        green: "bg-emerald-50 kpi-accent-green",
+        red:   "bg-rose-50 kpi-accent-red",
+        amber: "bg-amber-50 kpi-accent-amber",
+        cyan:  "bg-cyan-50 kpi-accent-cyan",
+      }[tone] || "bg-white kpi-accent-slate";
+    }
+
+    function kpiCard(label, value, tone = "slate", helpText = "", compareText = "") {
+      const help = helpText ? `<span class="help-wrap"><span class="help-dot">i</span><span class="help-tip">${helpText}</span></span>` : "";
+      const compare = compareText ? `<div class="mt-1 text-xs text-slate-500">${compareText}</div>` : "";
+      return `<div class="kpi-badge rounded-lg p-4 ${toneClass(tone)}"><div class="text-xs text-slate-500 uppercase tracking-wide flex items-center gap-1">${label}${help}</div><div class="mono mt-2 text-2xl font-bold text-slate-900 leading-none">${value}</div>${compare}</div>`;
+    }
+
+    function loadPersistedState() {
+      try {
+        const f = JSON.parse(localStorage.getItem(STORAGE_KEYS.filters) || "{}");
+        if (Number.isFinite(Number(f.yearFrom))) state.yearFrom = Number(f.yearFrom);
+        if (Number.isFinite(Number(f.yearTo))) state.yearTo = Number(f.yearTo);
+        if (Number.isFinite(Number(f.focusYear))) state.focusYear = Number(f.focusYear);
+        if (typeof f.customer === "string") state.customer = f.customer;
+        if (Number.isFinite(Number(f.topN))) state.topN = Number(f.topN);
+        if (typeof f.includeForecast === "boolean") state.includeForecast = f.includeForecast;
+        if (typeof f.compareMode === "boolean") state.compareMode = f.compareMode;
+        if (typeof f.viewPreset === "string") state.viewPreset = f.viewPreset;
+        if (typeof f.viewTab === "string") state.viewTab = f.viewTab;
+      } catch (_) {}
+      try {
+        const t = JSON.parse(localStorage.getItem(STORAGE_KEYS.tables) || "{}");
+        Object.assign(tableUiState, t || {});
+      } catch (_) {}
+      try {
+        const p = JSON.parse(localStorage.getItem(STORAGE_KEYS.panels) || "{}");
+        if (p && typeof p === "object") {
+          panelLayoutState.collapsed = p.collapsed && typeof p.collapsed === "object" ? p.collapsed : {};
+          panelLayoutState.pinned = typeof p.pinned === "string" ? p.pinned : null;
+          panelLayoutState.focused = typeof p.focused === "string" ? p.focused : null;
+        }
+      } catch (_) {}
+    }
+
+    function readUrlState() {
+      const q = new URLSearchParams(window.location.search);
+      if (q.has("yf")) state.yearFrom = Number(q.get("yf"));
+      if (q.has("yt")) state.yearTo = Number(q.get("yt"));
+      if (q.has("fy")) state.focusYear = Number(q.get("fy"));
+      if (q.has("cq")) state.customer = q.get("cq") || "";
+      if (q.has("n")) state.topN = Number(q.get("n"));
+      if (q.has("fc")) state.includeForecast = q.get("fc") === "1";
+      if (q.has("cm")) state.compareMode = q.get("cm") === "1";
+      if (q.has("vp")) state.viewPreset = q.get("vp") || "custom";
+      if (q.has("tab")) state.viewTab = q.get("tab") || "focus";
+    }
+
+    function saveFiltersState() {
+      try {
+        localStorage.setItem(STORAGE_KEYS.filters, JSON.stringify(state));
+      } catch (_) {}
+      const q = new URLSearchParams();
+      q.set("yf", String(state.yearFrom));
+      q.set("yt", String(state.yearTo));
+      q.set("fy", String(state.focusYear));
+      if (state.customer) q.set("cq", state.customer);
+      q.set("n", String(state.topN));
+      q.set("fc", state.includeForecast ? "1" : "0");
+      q.set("cm", state.compareMode ? "1" : "0");
+      q.set("tab", state.viewTab === "date" ? "date" : "focus");
+      if (state.viewPreset && state.viewPreset !== "custom") q.set("vp", state.viewPreset);
+      history.replaceState(null, "", `${window.location.pathname}?${q.toString()}`);
+    }
+
+    function applyDashboardTab() {
+      if (!["focus", "date"].includes(state.viewTab)) state.viewTab = "focus";
+      document.querySelectorAll("[data-dashboard-scope]").forEach((node) => {
+        const scope = node.getAttribute("data-dashboard-scope");
+        if (!scope || scope === "shared") {
+          node.classList.remove("hidden");
+          return;
+        }
+        if (scope === state.viewTab) node.classList.remove("hidden");
+        else node.classList.add("hidden");
+      });
+      if (el.tabFocusDashboard && el.tabDateDashboard) {
+        const focusActive = state.viewTab === "focus";
+        el.tabFocusDashboard.className = `px-3 py-1.5 rounded border text-sm ${focusActive ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300 bg-white text-slate-700"}`;
+        el.tabDateDashboard.className = `px-3 py-1.5 rounded border text-sm ${!focusActive ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300 bg-white text-slate-700"}`;
+        el.tabFocusDashboard.setAttribute("aria-selected", focusActive ? "true" : "false");
+        el.tabDateDashboard.setAttribute("aria-selected", !focusActive ? "true" : "false");
+        el.tabFocusDashboard.setAttribute("tabindex", focusActive ? "0" : "-1");
+        el.tabDateDashboard.setAttribute("tabindex", !focusActive ? "0" : "-1");
+      }
+    }
+
+    function saveTablesState() {
+      try {
+        localStorage.setItem(STORAGE_KEYS.tables, JSON.stringify(tableUiState));
+      } catch (_) {}
+    }
+
+    function savePanelsState() {
+      try {
+        localStorage.setItem(STORAGE_KEYS.panels, JSON.stringify(panelLayoutState));
+      } catch (_) {}
+    }
+
+    function resizeChartsSoon() {
+      setTimeout(() => {
+        Object.values(charts).forEach(c => c?.resize?.());
+      }, 80);
+    }
+
+    function setFocusedPanel(panelId) {
+      panelLayoutState.focused = panelId || null;
+      managedPanels.forEach((panel) => {
+        if (!(panel instanceof HTMLElement)) return;
+        panel.classList.toggle("panel-focused", panelLayoutState.focused === panel.dataset.panelId);
+      });
+      if (el.panelFocusBackdrop) el.panelFocusBackdrop.classList.toggle("show", Boolean(panelLayoutState.focused));
+      document.body.classList.toggle("panel-focus-open", Boolean(panelLayoutState.focused));
+      savePanelsState();
+      resizeChartsSoon();
+    }
+
+    function setPinnedPanel(panelId) {
+      panelLayoutState.pinned = panelId || null;
+      managedPanels.forEach((panel) => {
+        if (!(panel instanceof HTMLElement)) return;
+        panel.classList.toggle("panel-pinned", panelLayoutState.pinned === panel.dataset.panelId);
+      });
+      savePanelsState();
+      resizeChartsSoon();
+    }
+
+    function applyPanelStatesToNode(panel) {
+      if (!(panel instanceof HTMLElement)) return;
+      const panelId = panel.dataset.panelId;
+      panel.classList.toggle("panel-collapsed", Boolean(panelLayoutState.collapsed[panelId]));
+      panel.classList.toggle("panel-pinned", panelLayoutState.pinned === panelId);
+      panel.classList.toggle("panel-focused", panelLayoutState.focused === panelId);
+      const collapseBtn = panel.querySelector(".panel-collapse");
+      const pinBtn = panel.querySelector(".panel-pin");
+      const focusBtn = panel.querySelector(".panel-focus");
+      if (collapseBtn instanceof HTMLElement) collapseBtn.classList.toggle("active", panel.classList.contains("panel-collapsed"));
+      if (pinBtn instanceof HTMLElement) pinBtn.classList.toggle("active", panel.classList.contains("panel-pinned"));
+      if (focusBtn instanceof HTMLElement) focusBtn.classList.toggle("active", panel.classList.contains("panel-focused"));
+    }
+
+    function applyPanelStates() {
+      managedPanels.forEach(applyPanelStatesToNode);
+      if (el.panelFocusBackdrop) el.panelFocusBackdrop.classList.toggle("show", Boolean(panelLayoutState.focused));
+      document.body.classList.toggle("panel-focus-open", Boolean(panelLayoutState.focused));
+    }
+
+    function initPanelControls() {
+      managedPanels = [...document.querySelectorAll("main .panel")]
+        .filter(panel => panel.querySelector("canvas") || panel.querySelector("div[id$='Table']"));
+      managedPanels.forEach((panel, idx) => {
+        if (!(panel instanceof HTMLElement)) return;
+        panel.classList.add("panel-managed");
+        if (!panel.dataset.panelId) panel.dataset.panelId = panel.id || `panel-${idx + 1}`;
+        const header = panel.firstElementChild;
+        if (!(header instanceof HTMLElement)) return;
+        if (!header.classList.contains("flex") || !header.classList.contains("justify-between")) return;
+
+        let actionHost = header.lastElementChild;
+        const titleNode = header.querySelector("h2, h3");
+        if (!(actionHost instanceof HTMLElement) || actionHost === titleNode) {
+          actionHost = document.createElement("div");
+          actionHost.className = "flex items-center gap-2";
+          header.appendChild(actionHost);
+        } else if (actionHost.tagName === "BUTTON") {
+          const wrap = document.createElement("div");
+          wrap.className = "flex items-center gap-2";
+          header.replaceChild(wrap, actionHost);
+          wrap.appendChild(actionHost);
+          actionHost = wrap;
+        }
+
+        if (!actionHost.querySelector(".panel-controls")) {
+          const controls = document.createElement("div");
+          controls.className = "panel-controls";
+          controls.innerHTML = `
+            <button type="button" class="panel-btn panel-collapse" title="Minimize to title">▁</button>
+            <button type="button" class="panel-btn panel-pin" title="Pin large in layout">▣</button>
+            <button type="button" class="panel-btn panel-focus" title="Focus view (4x)">⤢</button>
+          `;
+          actionHost.appendChild(controls);
+        }
+      });
+
+      applyPanelStates();
+
+      managedPanels.forEach((panel) => {
+        if (!(panel instanceof HTMLElement)) return;
+        const panelId = panel.dataset.panelId;
+        const collapseBtn = panel.querySelector(".panel-collapse");
+        const pinBtn = panel.querySelector(".panel-pin");
+        const focusBtn = panel.querySelector(".panel-focus");
+        collapseBtn?.addEventListener("click", () => {
+          panelLayoutState.collapsed[panelId] = !panelLayoutState.collapsed[panelId];
+          if (!panelLayoutState.collapsed[panelId]) delete panelLayoutState.collapsed[panelId];
+          applyPanelStatesToNode(panel);
+          savePanelsState();
+          resizeChartsSoon();
+        });
+        pinBtn?.addEventListener("click", () => {
+          setPinnedPanel(panelLayoutState.pinned === panelId ? null : panelId);
+          applyPanelStates();
+        });
+        focusBtn?.addEventListener("click", () => {
+          setFocusedPanel(panelLayoutState.focused === panelId ? null : panelId);
+          applyPanelStates();
+        });
+      });
+    }
+
+    async function loadCsv(file) {
+      const url = `${CSV_BASE}${file}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to load ${file}: HTTP ${res.status}`);
+      const text = await res.text();
+      const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+      if (parsed.errors?.length) throw new Error(`Parse error in ${file}: ${parsed.errors[0].message}`);
+      csvMeta[file] = { lastModified: res.headers.get("last-modified") };
+      return parsed.data;
+    }
+
+    function renderError(message) {
+      el.errorBox.classList.remove("hidden");
+      el.errorBox.innerHTML = `<strong>Data load issue:</strong> ${esc(message)}<br><span class="text-sm">Tip: run <code>bash analysis/run.sh</code> and if needed serve with <code>python3 -m http.server 8000</code>.</span>`;
+    }
+
+    function makeChart(id, config) {
+      if (charts[id]) charts[id].destroy();
+      charts[id] = new Chart(document.getElementById(id), config);
+    }
+
+    function buildTable(containerId, columns, rows, options = {}) {
+      const container = document.getElementById(containerId);
+      const limit = options.limit ?? 25;
+      const ui = tableUiState[containerId] ||= { sortKey: options.defaultSortKey || columns[0]?.key, sortDir: options.defaultSortDir || "asc", colWidths: {} };
+      const colMap = Object.fromEntries(columns.map(c => [c.key, c]));
+      const col = colMap[ui.sortKey] || columns[0];
+      const sorted = [...rows].sort((a, b) => {
+        const av = col.sortValue ? col.sortValue(a) : a[col.key];
+        const bv = col.sortValue ? col.sortValue(b) : b[col.key];
+        const an = typeof av === "number" ? av : Number(av);
+        const bn = typeof bv === "number" ? bv : Number(bv);
+        let cmp;
+        if (Number.isFinite(an) && Number.isFinite(bn)) cmp = an - bn;
+        else {
+          const ad = Date.parse(av);
+          const bd = Date.parse(bv);
+          if (Number.isFinite(ad) && Number.isFinite(bd)) cmp = ad - bd;
+          else cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, { sensitivity: "base" });
+        }
+        return ui.sortDir === "asc" ? cmp : -cmp;
+      });
+      const clipped = sorted.slice(0, limit);
+      visibleTables[containerId] = { columns, rows: clipped };
+
+      const colgroup = `<colgroup>${columns.map((_, idx) => `<col ${ui.colWidths?.[idx] ? `style="width:${ui.colWidths[idx]}px"` : ""}>`).join("")}</colgroup>`;
+      const head = `<tr>${columns.map((c, idx) => {
+        const arrow = ui.sortKey === c.key ? (ui.sortDir === "asc" ? " ▲" : " ▼") : "";
+        return `<th class="bg-slate-100 text-left text-xs font-semibold px-3 py-2 whitespace-nowrap overflow-hidden text-ellipsis sort-th" data-table="${containerId}" data-key="${esc(c.key)}" data-col-idx="${idx}">${esc(c.label)}${arrow}<span class="col-resize-handle" data-table="${containerId}" data-col-idx="${idx}"></span></th>`;
+      }).join("")}</tr>`;
+      const body = clipped.map(r => `<tr class="border-t border-slate-100">${columns.map(c => `<td class="px-3 py-2 text-sm whitespace-nowrap overflow-hidden text-ellipsis ${c.className || ""}">${c.render ? c.render(r[c.key], r) : esc(r[c.key] ?? "-")}</td>`).join("")}</tr>`).join("");
+      const controls = `<div class="flex items-center justify-end gap-2 mb-2"><span class="text-xs text-slate-500">${clipped.length} shown / ${rows.length} total (use master filters)</span></div>`;
+      container.innerHTML = `${controls}<div class="table-shell"><table class="resizable-table min-w-full">${colgroup}<thead class="sticky-head">${head}</thead><tbody>${body || `<tr><td colspan="${columns.length}" class="px-3 py-3 text-sm text-slate-500">No rows</td></tr>`}</tbody></table></div>`;
+    }
+
+    function exportVisibleTable(tableId) {
+      const t = visibleTables[tableId];
+      if (!t) return;
+      const lines = [t.columns.map(c => `"${String(c.label).replace(/"/g, '""')}"`).join(",")];
+      for (const row of t.rows) lines.push(t.columns.map(c => `"${String(row[c.key] ?? "").replace(/"/g, '""')}"`).join(","));
+      const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${tableId}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+    }
+
+    async function downloadBundleZip() {
+      const zip = new JSZip();
+      for (const [tableId, t] of Object.entries(visibleTables)) {
+        const lines = [t.columns.map(c => `"${String(c.label).replace(/"/g, '""')}"`).join(",")];
+        for (const row of t.rows) lines.push(t.columns.map(c => `"${String(row[c.key] ?? "").replace(/"/g, '""')}"`).join(","));
+        zip.file(`${tableId}.csv`, lines.join("\n"));
+      }
+      const blob = await zip.generateAsync({ type: "blob" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `dashboard-view-bundle-${new Date().toISOString().slice(0,10)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function downloadChartPng(chartId) {
+      const c = charts[chartId];
+      if (!c) return;
+      const a = document.createElement("a");
+      a.href = c.toBase64Image("image/png", 1);
+      a.download = `${chartId}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    function downloadChartCsv(chartId) {
+      const c = charts[chartId];
+      if (!c) return;
+      const labels = c.data.labels || [];
+      const datasets = c.data.datasets || [];
+      const header = ["label", ...datasets.map(d => d.label || "series")];
+      const lines = [header.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")];
+      labels.forEach((label, i) => {
+        const row = [label, ...datasets.map(d => Array.isArray(d.data) ? d.data[i] : "")];
+        lines.push(row.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","));
+      });
+      const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${chartId}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function renderActiveFilters() {
+      const chips = [
+        `Year range: ${state.yearFrom}-${state.yearTo}`,
+        `Focus year: ${state.focusYear}`,
+        `Customer: ${state.customer || "All"}`,
+        `Top N: ${state.topN}`,
+        `Forecast: ${state.includeForecast ? "On" : "Off"}`,
+        `Compare mode: ${state.compareMode ? "On" : "Off"}`,
+      ];
+      if (state.viewPreset && state.viewPreset !== "custom") chips.push(`Preset: ${state.viewPreset}`);
+      chips.push(`Dashboard: ${state.viewTab === "date" ? "Date range" : "Focus year"}`);
+      el.activeFilters.innerHTML = chips.map(v => `<span class="px-2 py-1 rounded bg-slate-100 border border-slate-200 text-slate-700">${esc(v)}</span>`).join("");
+    }
+
+    function renderCoverageCard(data) {
+      const allMonths = data.forecast.map(r => r.month_start).filter(Boolean).sort();
+      const firstMonth = allMonths[0] || "-";
+      const lastMonth = allMonths[allMonths.length - 1] || "-";
+      el.dataCoverage.innerHTML = `<div class="flex flex-wrap items-center gap-3 justify-between">
+        <h2 class="text-sm font-semibold">Data Coverage</h2>
+        <div class="flex flex-wrap gap-2 text-xs">
+          <span class="px-2 py-1 rounded bg-slate-100 border border-slate-200">Months: ${esc(firstMonth)} to ${esc(lastMonth)}</span>
+          <span class="px-2 py-1 rounded bg-slate-100 border border-slate-200">Year rows: ${data.yearly.length}</span>
+          <span class="px-2 py-1 rounded bg-slate-100 border border-slate-200">Customers: ${new Set(data.reconYear.map(r => r.customer_name_norm).filter(Boolean)).size}</span>
+          <span class="px-2 py-1 rounded bg-slate-100 border border-slate-200">Unmatched rows: ${data.recon.length}</span>
+          <span class="px-2 py-1 rounded bg-slate-100 border border-slate-200">Anomalies: ${data.anomalies.length}</span>
+        </div>
+      </div>`;
+    }
+
+    function applyPreset(name, years) {
+      const minYear = years[0];
+      const maxYear = years[years.length - 1];
+      const recentFrom = Math.max(minYear, maxYear - 4);
+      state.viewPreset = name;
+      if (name === "default") {
+        state.yearFrom = minYear;
+        state.yearTo = maxYear;
+        state.focusYear = maxYear;
+        state.customer = "";
+        state.topN = 8;
+        state.includeForecast = true;
+        state.compareMode = false;
+      } else if (name === "collections") {
+        state.yearFrom = recentFrom;
+        state.yearTo = maxYear;
+        state.focusYear = maxYear;
+        state.customer = "";
+        state.topN = 15;
+        state.includeForecast = false;
+        state.compareMode = true;
+      } else if (name === "growth") {
+        state.yearFrom = recentFrom;
+        state.yearTo = maxYear;
+        state.focusYear = maxYear;
+        state.customer = "";
+        state.topN = 10;
+        state.includeForecast = true;
+        state.compareMode = true;
+      } else if (name === "concentration") {
+        state.yearFrom = minYear;
+        state.yearTo = maxYear;
+        state.focusYear = maxYear;
+        state.customer = "";
+        state.topN = 5;
+        state.includeForecast = false;
+        state.compareMode = true;
+      }
+    }
+
+    function parseData(raw) {
+      return {
+        yearly: raw.yearly.map(r => ({ ...r, year: toNum(r.year), invoices_total: toNum(r.invoices_total), payments_total: toNum(r.payments_total), credits_total: toNum(r.credits_total), net_total: toNum(r.net_total) })).sort((a,b)=>a.year-b.year),
+        concentration: raw.concentration.map(r => ({ ...r, year: toNum(r.year), top_1_share: toNum(r.top_1_share), top_5_share: toNum(r.top_5_share), top_10_share: toNum(r.top_10_share) })).sort((a,b)=>a.year-b.year),
+        drift: raw.drift.map(r => ({ ...r, year: toNum(r.year), median_invoice: toNum(r.median_invoice), p75_invoice: toNum(r.p75_invoice), p90_invoice: toNum(r.p90_invoice), p95_invoice: toNum(r.p95_invoice) })).sort((a,b)=>a.year-b.year),
+        dso: raw.dso.map(r => ({ ...r, month_start: r.month_start, dso_3m: toNum(r.dso_3m) })),
+        retention: raw.retention.map(r => ({ ...r, year: toNum(r.year), new_customers: toNum(r.new_customers), retained_customers: toNum(r.retained_customers), reactivated_customers: toNum(r.reactivated_customers), churned_customers: toNum(r.churned_customers) })).sort((a,b)=>a.year-b.year),
+        sizeMix: raw.sizeMix.map(r => ({ ...r, year: toNum(r.year), invoice_band: r.invoice_band, revenue_share: toNum(r.revenue_share) })),
+        currency: raw.currency.map(r => ({ ...r, year: toNum(r.year), currency: r.currency, invoice_total: toNum(r.invoice_total), share_of_year: toNum(r.share_of_year) })),
+        country: raw.country.map(r => ({ ...r, year: toNum(r.year), country: r.country, invoice_total: toNum(r.invoice_total), share_of_year: toNum(r.share_of_year) })),
+        collections: raw.collections.map(r => ({ ...r, customer_name_norm: r.customer_name_norm, open_balance: toNum(r.open_balance), bucket_90_plus: toNum(r.bucket_90_plus), share_90_plus: toNum(r.share_90_plus), high_collections_risk: toNum(r.high_collections_risk) })),
+        payment: raw.payment.map(r => ({ ...r, customer_name_norm: r.customer_name_norm, matched_amount: toNum(r.matched_amount), median_days_to_pay: toNum(r.median_days_to_pay), p90_days_to_pay: toNum(r.p90_days_to_pay), late_share_60d: toNum(r.late_share_60d) })),
+        anomalies: raw.anomalies.map(r => ({ ...r, event_date: r.event_date, anomaly_type: r.anomaly_type, customer_name_norm: r.customer_name_norm, amount: toNum(r.amount), threshold: toNum(r.threshold) })),
+        forecast: raw.forecast.map(r => ({ ...r, month_start: r.month_start, invoices_total: toNum(r.invoices_total), forecast_invoices: toNum(r.forecast_invoices), is_forecast: toNum(r.is_forecast) })),
+        recon: raw.recon.map(r => ({ ...r, customer_name_norm: r.customer_name_norm, debit_date: r.debit_date, unmatched_amount: toNum(r.unmatched_amount), age_days_asof_latest: toNum(r.age_days_asof_latest) })),
+        reconYear: raw.reconYear.map(r => ({ ...r, year: toNum(r.year), customer_name_norm: r.customer_name_norm, gross_invoices: toNum(r.gross_invoices) })),
+      };
+    }
+
+    function getTopCrossRows(data, focusYear, topN, customerQuery="") {
+      const q = (customerQuery || "").trim().toLowerCase();
+      const byCustomer = new Map();
+      for (const r of data.reconYear) {
+        if (!byCustomer.has(r.customer_name_norm)) byCustomer.set(r.customer_name_norm, {});
+        byCustomer.get(r.customer_name_norm)[r.year] = r.gross_invoices || 0;
+      }
+      return [...byCustomer.entries()]
+        .map(([customer, y]) => {
+          const current = y[focusYear] || 0;
+          const prior = y[focusYear - 1] || 0;
+          const yoy = prior > 0 ? (current - prior) / prior : null;
+          return { customer, current, prior, yoy };
+        })
+        .filter(r => r.current > 0)
+        .filter(r => !q || r.customer.toLowerCase().includes(q))
+        .sort((a,b)=>b.current-a.current)
+        .slice(0, topN);
+    }
+
+    function applyFreshnessBadge() {
+      const all = Object.values(csvMeta).map(x => x?.lastModified).filter(Boolean).map(v => new Date(v)).filter(d => !Number.isNaN(d.valueOf()));
+      if (!all.length) {
+        el.dataFreshness.textContent = "Data freshness: unavailable (file://)";
+        return;
+      }
+      const latest = new Date(Math.max(...all.map(d => d.getTime())));
+      el.dataFreshness.textContent = `Data freshness: ${latest.toLocaleString()}`;
+    }
+
+    function openDrawer(customer, data) {
+      const fy = state.focusYear;
+      const yearly = data.reconYear.filter(r => r.customer_name_norm === customer).sort((a,b)=>a.year-b.year);
+      const focus = yearly.find(r => r.year === fy)?.gross_invoices || 0;
+      const prior = yearly.find(r => r.year === fy - 1)?.gross_invoices || 0;
+      const yoy = prior > 0 ? (focus - prior) / prior : null;
+      const coll = data.collections.find(r => r.customer_name_norm === customer);
+      const pay = data.payment.find(r => r.customer_name_norm === customer);
+      const anom = data.anomalies.filter(r => r.customer_name_norm === customer).slice(0, 10);
+
+      el.drawerTitle.textContent = customer;
+      el.drawerFocusSales.textContent = fmtCurrency(focus);
+      el.drawerYoY.innerHTML = yoy == null ? "-" : `<span class="${yoy >= 0 ? "text-emerald-700" : "text-rose-700"}">${fmtPct(yoy)}</span>`;
+      el.drawerOpenBalance.textContent = fmtCurrency(coll?.open_balance);
+      el.drawerLateShare.textContent = fmtPct(pay?.late_share_60d);
+      el.drawerAnomalies.innerHTML = anom.length
+        ? `<ul class="text-sm space-y-1">${anom.map(a => `<li><span class="text-slate-500">${esc(a.event_date)}</span> - ${esc(a.anomaly_type)} - ${fmtCurrency(a.amount)}</li>`).join("")}</ul>`
+        : `<p class="text-sm text-slate-500">No recent anomalies.</p>`;
+
+      makeChart("drawerSalesChart", {
+        type: "line",
+        data: {
+          labels: yearly.map(r => r.year),
+          datasets: [{ label: "Sales", data: yearly.map(r => r.gross_invoices), borderColor: "#0f766e", tension: 0.25 }],
+        },
+        options: { responsive: true, plugins: { legend: { display: false } } },
+      });
+
+      el.drawer.classList.remove("translate-x-full");
+    }
+
+    function closeDrawer() { el.drawer.classList.add("translate-x-full"); }
+
+    function renderAll(data) {
+      const years = [...new Set(data.yearly.map(r => r.year).filter(Boolean))].sort((a,b)=>a-b);
+      if (!years.length) return;
+      if (!years.includes(state.yearFrom)) state.yearFrom = years[0];
+      if (!years.includes(state.yearTo)) state.yearTo = years[years.length - 1];
+      if (state.yearFrom > state.yearTo) state.yearFrom = state.yearTo;
+      if (!years.includes(state.focusYear)) state.focusYear = state.yearTo;
+      const inRange = (y) => y != null && y >= state.yearFrom && y <= state.yearTo;
+      const q = state.customer.trim().toLowerCase();
+
+      const yRow = data.yearly.find(r => r.year === state.focusYear) || data.yearly[data.yearly.length - 1];
+      const yPrev = data.yearly.find(r => r.year === state.focusYear - 1);
+      const cRow = data.concentration.find(r => r.year === state.focusYear) || data.concentration[data.concentration.length - 1];
+      const cPrev = data.concentration.find(r => r.year === state.focusYear - 1);
+      const dsoLatest = [...data.dso].reverse().find(r => inRange(yearOf(r.month_start)) && r.dso_3m != null);
+      const riskCount = data.collections.filter(r => (!q || r.customer_name_norm.toLowerCase().includes(q)) && (r.high_collections_risk === 1)).length;
+      const dsoPrior = [...data.dso].reverse().find(r => yearOf(r.month_start) === state.focusYear - 1 && r.dso_3m != null);
+      const invoicesDelta = yPrev?.invoices_total ? (yRow.invoices_total - yPrev.invoices_total) / yPrev.invoices_total : null;
+      const paymentsDelta = yPrev?.payments_total ? (yRow.payments_total - yPrev.payments_total) / yPrev.payments_total : null;
+      const netDelta = yPrev?.net_total ? (yRow.net_total - yPrev.net_total) / Math.abs(yPrev.net_total) : null;
+      const top1Delta = cPrev?.top_1_share != null ? cRow.top_1_share - cPrev.top_1_share : null;
+      const dsoDelta = (dsoLatest?.dso_3m != null && dsoPrior?.dso_3m != null) ? dsoLatest.dso_3m - dsoPrior.dso_3m : null;
+      const prevRiskCount = data.collections.filter(r => r.high_collections_risk === 1).length;
+      const riskDelta = riskCount - prevRiskCount;
+
+      el.kpis.innerHTML = [
+        kpiCard(`Invoices (${state.focusYear})`, fmtCurrency(yRow.invoices_total), "cyan", "Total invoiced amount for the focus year within your global filter context.", state.compareMode ? `vs ${state.focusYear - 1}: ${fmtPct(invoicesDelta)}` : ""),
+        kpiCard(`Payments (${state.focusYear})`, fmtCurrency(yRow.payments_total), "green", "Total recorded payments for the focus year.", state.compareMode ? `vs ${state.focusYear - 1}: ${fmtPct(paymentsDelta)}` : ""),
+        kpiCard(`Net (${state.focusYear})`, fmtCurrency(yRow.net_total), yRow.net_total >= 0 ? "green" : "red", "Net = invoices + credits - payments for focus year. Use for directional billing/collection balance.", state.compareMode ? `vs ${state.focusYear - 1}: ${fmtPct(netDelta)}` : ""),
+        kpiCard("Top-1 Share", fmtPct(cRow.top_1_share), kpiToneForTop1(cRow.top_1_share), "Share of focus-year revenue from largest customer. High values indicate dependency risk.", state.compareMode ? `vs ${state.focusYear - 1}: ${top1Delta == null ? "-" : `${(top1Delta * 100).toFixed(1)} pp`}` : ""),
+        kpiCard("Latest DSO", dsoLatest ? fmtNum(dsoLatest.dso_3m, 1) : "-", kpiToneForDSO(dsoLatest?.dso_3m), "Days Sales Outstanding from rolling denominator. Rising trend can indicate collections pressure.", state.compareMode ? `vs prior year: ${dsoDelta == null ? "-" : `${fmtNum(dsoDelta, 1)} days`}` : ""),
+        kpiCard("High-Risk A/R", String(riskCount), kpiToneForRisk(riskCount), "Count of latest-period high-risk accounts under current customer filter.", state.compareMode ? `Delta vs full latest snapshot: ${riskDelta >= 0 ? "+" : ""}${riskDelta}` : ""),
+      ].join("");
+
+      renderActiveFilters();
+
+      const yearlyRows = data.yearly.filter(r => inRange(r.year));
+      makeChart("yearlyChart", {
+        type: "bar",
+        data: {
+          labels: yearlyRows.map(r => r.year),
+          datasets: [
+            { label: "Invoices", data: yearlyRows.map(r => r.invoices_total), backgroundColor: "#0f766e" },
+            { label: "Payments", data: yearlyRows.map(r => r.payments_total), backgroundColor: "#0369a1" },
+            { label: "Credits", data: yearlyRows.map(r => r.credits_total), backgroundColor: "#be123c" },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: "bottom" } },
+          scales: { y: { ticks: { callback: v => v >= 1e6 ? `$${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v}` } } },
+        },
+      });
+
+      const forecastRows = data.forecast.filter(r => inRange(yearOf(r.month_start)));
+      makeChart("monthlyForecastChart", {
+        type: "line",
+        data: {
+          labels: forecastRows.map(r => r.month_start),
+          datasets: [
+            { label: "Actual", data: forecastRows.map(r => r.invoices_total), borderColor: "#0f766e", pointRadius: 0, spanGaps: true },
+            ...(state.includeForecast ? [{ label: "Forecast", data: forecastRows.map(r => r.forecast_invoices), borderColor: "#2563eb", borderDash: [6,4], pointRadius: 0, spanGaps: true }] : []),
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: "bottom" } },
+          scales: { y: { ticks: { callback: v => v >= 1e6 ? `$${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v}` } } },
+        },
+      });
+
+      const concRows = data.concentration.filter(r => inRange(r.year));
+      makeChart("concentrationChart", {
+        type: "line",
+        data: {
+          labels: concRows.map(r => r.year),
+          datasets: [
+            { label: "Top 1", data: concRows.map(r => r.top_1_share), borderColor: "#7c3aed" },
+            { label: "Top 5", data: concRows.map(r => r.top_5_share), borderColor: "#0f766e" },
+            { label: "Top 10", data: concRows.map(r => r.top_10_share), borderColor: "#0369a1" },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: "bottom" } },
+          scales: { y: { min: 0, max: 1, ticks: { callback: v => `${(v * 100).toFixed(0)}%` } } },
+        },
+      });
+
+      const driftRows = data.drift.filter(r => inRange(r.year));
+      makeChart("driftChart", {
+        type: "line",
+        data: {
+          labels: driftRows.map(r => r.year),
+          datasets: [
+            { label: "Median", data: driftRows.map(r => r.median_invoice), borderColor: "#0f766e" },
+            { label: "P75", data: driftRows.map(r => r.p75_invoice), borderColor: "#0ea5e9" },
+            { label: "P90", data: driftRows.map(r => r.p90_invoice), borderColor: "#0284c7" },
+            { label: "P95", data: driftRows.map(r => r.p95_invoice), borderColor: "#7c3aed" },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: "bottom" } },
+          scales: { y: { ticks: { callback: v => v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v}` } } },
+        },
+      });
+
+      const retRows = data.retention.filter(r => inRange(r.year));
+      makeChart("retentionChart", {
+        type: "bar",
+        data: {
+          labels: retRows.map(r => r.year),
+          datasets: [
+            { label: "New", data: retRows.map(r => r.new_customers), backgroundColor: "#0ea5e9", stack: "cohort" },
+            { label: "Retained", data: retRows.map(r => r.retained_customers), backgroundColor: "#16a34a", stack: "cohort" },
+            { label: "Reactivated", data: retRows.map(r => r.reactivated_customers), backgroundColor: "#f59e0b", stack: "cohort" },
+            { label: "Churned", data: retRows.map(r => r.churned_customers), backgroundColor: "#dc2626", stack: "cohort" },
+          ],
+        },
+        options: { responsive: true, plugins: { legend: { position: "bottom" } }, scales: { x: { stacked: true }, y: { stacked: true } } },
+      });
+
+      const bands = ["<250", "250-999", "1000-4999", "5000+"];
+      const mixRows = data.sizeMix.filter(r => inRange(r.year));
+      const mixYears = [...new Set(mixRows.map(r => r.year))].sort((a,b)=>a-b);
+      makeChart("sizeMixChart", {
+        type: "bar",
+        data: {
+          labels: mixYears,
+          datasets: bands.map((b, i) => ({
+            label: b,
+            data: mixYears.map(y => mixRows.find(r => r.year === y && r.invoice_band === b)?.revenue_share || 0),
+            backgroundColor: ["#0284c7","#14b8a6","#f59e0b","#7c3aed"][i],
+            stack: "mix",
+          })),
+        },
+        options: { responsive: true, plugins: { legend: { position: "bottom" } }, scales: { x: { stacked: true }, y: { stacked: true, max: 1, ticks: { callback: v => `${(v * 100).toFixed(0)}%` } } } },
+      });
+
+      const currencyRows = data.currency.filter(r => r.year === state.focusYear).sort((a,b)=>(b.invoice_total||0)-(a.invoice_total||0)).slice(0, state.topN);
+      makeChart("currencyChart", {
+        type: "doughnut",
+        data: { labels: currencyRows.map(r => r.currency), datasets: [{ data: currencyRows.map(r => r.share_of_year), backgroundColor: ["#0f766e","#0284c7","#f59e0b","#64748b","#7c3aed","#ef4444","#14b8a6","#334155"] }] },
+        options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+      });
+
+      const countryRows = data.country.filter(r => r.year === state.focusYear).sort((a,b)=>(b.invoice_total||0)-(a.invoice_total||0)).slice(0, state.topN);
+      makeChart("countryChart", {
+        type: "doughnut",
+        data: { labels: countryRows.map(r => r.country), datasets: [{ data: countryRows.map(r => r.share_of_year), backgroundColor: ["#0369a1","#0891b2","#059669","#f59e0b","#7c3aed","#ef4444","#64748b","#94a3b8"] }] },
+        options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+      });
+
+      const topCrossRows = getTopCrossRows(data, state.focusYear, state.topN, state.customer);
+      makeChart("topCustomersYoYChart", {
+        type: "bar",
+        data: {
+          labels: topCrossRows.map(r => r.customer.length > 26 ? `${r.customer.slice(0,26)}...` : r.customer),
+          datasets: [
+            { type: "bar", label: `${state.focusYear-1} Sales`, data: topCrossRows.map(r => r.prior), backgroundColor: "#0284c7" },
+            { type: "bar", label: `${state.focusYear} Sales`, data: topCrossRows.map(r => r.current), backgroundColor: "#0f766e" },
+            { type: "line", label: "YoY %", data: topCrossRows.map(r => r.yoy), borderColor: "#7c3aed", yAxisID: "y1", pointBackgroundColor: topCrossRows.map(r => r.yoy == null ? "#94a3b8" : (r.yoy >= 0 ? "#16a34a" : "#dc2626")), tension: 0.25, spanGaps: true },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: "bottom" } },
+          scales: {
+            y: { beginAtZero: true, ticks: { callback: (v) => Number(v).toLocaleString() } },
+            y1: { position: "right", grid: { drawOnChartArea: false }, ticks: { callback: (v) => `${(Number(v)*100).toFixed(0)}%` } },
+          },
+          onClick: (_, els) => {
+            if (!els.length) return;
+            const idx = els[0].index;
+            const row = topCrossRows[idx];
+            if (row) openDrawer(row.customer, data);
+          },
+        },
+      });
+
+      buildTable("topCrossTabTable", [
+        { key: "customer", label: "Customer", render: v => customerLink(v) },
+        { key: "prior", label: `${state.focusYear - 1} Sales`, render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "current", label: `${state.focusYear} Sales`, render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "yoy", label: "YoY %", render: v => v == null ? "-" : `<span class="${v >= 0 ? "text-emerald-700 bg-emerald-50" : "text-rose-700 bg-rose-50"} px-1 py-0.5 rounded">${fmtPct(v)}</span>`, className: "mono text-right" },
+      ], topCrossRows, { limit: state.topN, defaultSortKey: "current", defaultSortDir: "desc" });
+
+      const containsCustomer = (name) => !q || String(name || "").toLowerCase().includes(q);
+
+      const topRows = getTopCrossRows(data, state.focusYear, 1000, state.customer).sort((a,b)=>b.current-a.current);
+      buildTable("topCustomersTable", [
+        { key: "customer", label: "Customer", render: v => customerLink(v) },
+        { key: "current", label: `${state.focusYear} Sales`, render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "yoy", label: "YoY %", render: v => v == null ? "-" : `<span class="${v >= 0 ? "text-emerald-700" : "text-rose-700"}">${fmtPct(v)}</span>`, className: "mono text-right" },
+      ], topRows, { limit: 30, defaultSortKey: "current", defaultSortDir: "desc" });
+
+      const deltaRows = getTopCrossRows(data, state.focusYear, 2000, state.customer)
+        .map(r => ({ customer_name_norm: r.customer, delta: r.current - r.prior, current: r.current, prior: r.prior, yoy: r.yoy }))
+        .sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
+      buildTable("deltaTable", [
+        { key: "customer_name_norm", label: "Customer", render: v => customerLink(v) },
+        { key: "prior", label: `${state.focusYear-1}`, render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "current", label: `${state.focusYear}`, render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "delta", label: "Delta", render: v => `<span class="${v >= 0 ? "text-emerald-700" : "text-rose-700"}">${fmtCurrency(v)}</span>`, className: "mono text-right" },
+        { key: "yoy", label: "YoY %", render: v => v == null ? "-" : fmtPct(v), className: "mono text-right" },
+      ], deltaRows, { limit: 30, defaultSortKey: "delta", defaultSortDir: "desc" });
+
+      const collectionsRows = data.collections.filter(r => containsCustomer(r.customer_name_norm)).sort((a,b)=>(b.bucket_90_plus||0)-(a.bucket_90_plus||0));
+      buildTable("collectionsTable", [
+        { key: "customer_name_norm", label: "Customer", render: v => customerLink(v) },
+        { key: "open_balance", label: "Open", render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "bucket_90_plus", label: "90+", render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "share_90_plus", label: "90+ Share", render: v => {
+          if (v == null) return "-";
+          const c = v > 0.6 ? "bg-rose-50 text-rose-700" : v > 0.35 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700";
+          return `<span class="px-1 py-0.5 rounded ${c}">${fmtPct(v)}</span>`;
+        }, className: "mono text-right" },
+        { key: "high_collections_risk", label: "Risk", render: v => Number(v) === 1 ? '<span class="badge bg-rose-100 text-rose-700">High</span>' : '<span class="badge bg-slate-100 text-slate-600">Normal</span>' },
+      ], collectionsRows, { limit: 30, defaultSortKey: "bucket_90_plus", defaultSortDir: "desc" });
+
+      const paymentRows = data.payment.filter(r => containsCustomer(r.customer_name_norm));
+      buildTable("paymentTable", [
+        { key: "customer_name_norm", label: "Customer", render: v => customerLink(v) },
+        { key: "matched_amount", label: "Matched $", render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "median_days_to_pay", label: "Median Days", render: v => fmtNum(v, 1), className: "mono text-right" },
+        { key: "p90_days_to_pay", label: "P90 Days", render: v => fmtNum(v, 1), className: "mono text-right" },
+        { key: "late_share_60d", label: "Late >60d", render: v => {
+          if (v == null) return "-";
+          const c = v > 0.35 ? "bg-rose-50 text-rose-700" : v > 0.15 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700";
+          return `<span class="px-1 py-0.5 rounded ${c}">${fmtPct(v)}</span>`;
+        }, className: "mono text-right" },
+      ], paymentRows, { limit: 30, defaultSortKey: "matched_amount", defaultSortDir: "desc" });
+
+      const reconRows = data.recon.filter(r => containsCustomer(r.customer_name_norm));
+      buildTable("reconTable", [
+        { key: "customer_name_norm", label: "Customer", render: v => customerLink(v) },
+        { key: "debit_date", label: "Debit Date" },
+        { key: "unmatched_amount", label: "Unmatched", render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "age_days_asof_latest", label: "Age Days", render: v => fmtNum(v, 0), className: "mono text-right" },
+      ], reconRows, { limit: 30, defaultSortKey: "unmatched_amount", defaultSortDir: "desc" });
+
+      const anomalyRows = data.anomalies
+        .filter(r => containsCustomer(r.customer_name_norm))
+        .filter(r => inRange(yearOf(r.event_date)));
+      buildTable("anomalyTable", [
+        { key: "event_date", label: "Date" },
+        { key: "anomaly_type", label: "Type", render: v => {
+          const map = { invoice_outlier: "bg-amber-100 text-amber-800", customer_month_spike: "bg-orange-100 text-orange-800", credit_burst: "bg-violet-100 text-violet-800" };
+          return `<span class="badge ${map[v] || "bg-slate-100 text-slate-600"}">${esc(v)}</span>`;
+        }},
+        { key: "customer_name_norm", label: "Customer", render: v => customerLink(v) },
+        { key: "amount", label: "Amount", render: v => fmtCurrency(v), className: "mono text-right" },
+        { key: "threshold", label: "Threshold", render: v => fmtCurrency(v), className: "mono text-right" },
+      ], anomalyRows, { limit: 30, defaultSortKey: "event_date", defaultSortDir: "desc" });
+
+      el.yearFrom.value = String(state.yearFrom);
+      el.yearTo.value = String(state.yearTo);
+      el.focusYear.value = String(state.focusYear);
+      el.customerSelector.value = state.customer;
+      el.topN.value = String(state.topN);
+      el.includeForecast.checked = state.includeForecast;
+      el.compareMode.checked = state.compareMode;
+      el.viewPreset.value = state.viewPreset;
+      applyDashboardTab();
+      applyPanelStates();
+    }
+
+    function bindEvents(data) {
+      const years = [...new Set(data.yearly.map(r => r.year).filter(Boolean))].sort((a,b)=>a-b);
+      el.yearFrom.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join("");
+      el.yearTo.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join("");
+      el.focusYear.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join("");
+      const customers = [...new Set(data.reconYear.map(r => r.customer_name_norm).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+      el.customerList.innerHTML = customers.map(c => `<option value="${esc(c)}"></option>`).join("");
+
+      const defaultYearFrom = years[0];
+      const defaultYearTo = years[years.length - 1];
+      if (!years.includes(state.yearFrom)) state.yearFrom = defaultYearFrom;
+      if (!years.includes(state.yearTo)) state.yearTo = defaultYearTo;
+      if (state.yearFrom > state.yearTo) state.yearFrom = state.yearTo;
+      if (!years.includes(state.focusYear)) state.focusYear = state.yearTo;
+      if (![5,8,10,15,20].includes(Number(state.topN))) state.topN = 8;
+      if (!["custom", "default", "collections", "growth", "concentration"].includes(state.viewPreset)) state.viewPreset = "custom";
+      if (!["focus", "date"].includes(state.viewTab)) state.viewTab = "focus";
+
+      const rerender = () => { saveFiltersState(); renderAll(data); };
+      el.yearFrom.addEventListener("change", () => {
+        state.viewPreset = "custom";
+        state.yearFrom = Number(el.yearFrom.value);
+        if (state.yearFrom > state.yearTo) state.yearTo = state.yearFrom;
+        rerender();
+      });
+      el.yearTo.addEventListener("change", () => {
+        state.viewPreset = "custom";
+        state.yearTo = Number(el.yearTo.value);
+        if (state.yearTo < state.yearFrom) state.yearFrom = state.yearTo;
+        rerender();
+      });
+      el.focusYear.addEventListener("change", () => { state.viewPreset = "custom"; state.focusYear = Number(el.focusYear.value); rerender(); });
+      el.customerSelector.addEventListener("input", () => {
+        state.viewPreset = "custom";
+        clearTimeout(customerInputTimer);
+        customerInputTimer = setTimeout(() => {
+          state.customer = el.customerSelector.value;
+          rerender();
+        }, 180);
+      });
+      el.topN.addEventListener("change", () => { state.viewPreset = "custom"; state.topN = Number(el.topN.value); rerender(); });
+      el.includeForecast.addEventListener("change", () => { state.viewPreset = "custom"; state.includeForecast = el.includeForecast.checked; rerender(); });
+      el.compareMode.addEventListener("change", () => { state.viewPreset = "custom"; state.compareMode = el.compareMode.checked; rerender(); });
+      el.applyPreset.addEventListener("click", () => {
+        applyPreset(el.viewPreset.value, years);
+        rerender();
+      });
+      el.resetFilters.addEventListener("click", () => {
+        state.yearFrom = defaultYearFrom;
+        state.yearTo = defaultYearTo;
+        state.focusYear = defaultYearTo;
+        state.customer = "";
+        state.topN = 8;
+        state.includeForecast = true;
+        state.compareMode = false;
+        state.viewPreset = "custom";
+        rerender();
+      });
+      el.resetAllPrefs.addEventListener("click", () => {
+        localStorage.removeItem(STORAGE_KEYS.filters);
+        localStorage.removeItem(STORAGE_KEYS.tables);
+        localStorage.removeItem(STORAGE_KEYS.panels);
+        state.yearFrom = defaultYearFrom;
+        state.yearTo = defaultYearTo;
+        state.focusYear = defaultYearTo;
+        state.customer = "";
+        state.topN = 8;
+        state.includeForecast = true;
+        state.compareMode = false;
+        state.viewPreset = "custom";
+        state.viewTab = "focus";
+        Object.keys(tableUiState).forEach(k => delete tableUiState[k]);
+        panelLayoutState.collapsed = {};
+        panelLayoutState.pinned = null;
+        panelLayoutState.focused = null;
+        rerender();
+      });
+      el.downloadBundle.addEventListener("click", downloadBundleZip);
+      el.closeDrawer.addEventListener("click", closeDrawer);
+      el.toggleHelpDefs?.addEventListener("click", () => {
+        const isHidden = el.helpDefsPanel?.classList.contains("hidden");
+        if (!el.helpDefsPanel || !el.helpDefsChevron) return;
+        if (isHidden) {
+          el.helpDefsPanel.classList.remove("hidden");
+          el.helpDefsChevron.textContent = "▾";
+          el.toggleHelpDefs.setAttribute("aria-expanded", "true");
+        } else {
+          el.helpDefsPanel.classList.add("hidden");
+          el.helpDefsChevron.textContent = "▸";
+          el.toggleHelpDefs.setAttribute("aria-expanded", "false");
+        }
+      });
+      el.tabFocusDashboard?.addEventListener("click", () => {
+        state.viewTab = "focus";
+        rerender();
+      });
+      el.tabDateDashboard?.addEventListener("click", () => {
+        state.viewTab = "date";
+        rerender();
+      });
+      const onTabKeydown = (ev) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)) return;
+        ev.preventDefault();
+        const tabs = [el.tabFocusDashboard, el.tabDateDashboard].filter(Boolean);
+        const current = tabs.findIndex(t => t === document.activeElement);
+        const idx = current >= 0 ? current : 0;
+        let next = idx;
+        if (ev.key === "ArrowRight") next = (idx + 1) % tabs.length;
+        if (ev.key === "ArrowLeft") next = (idx - 1 + tabs.length) % tabs.length;
+        if (ev.key === "Home") next = 0;
+        if (ev.key === "End") next = tabs.length - 1;
+        tabs[next].focus();
+        tabs[next].click();
+      };
+      el.tabFocusDashboard?.addEventListener("keydown", onTabKeydown);
+      el.tabDateDashboard?.addEventListener("keydown", onTabKeydown);
+
+      document.querySelectorAll(".help-dot").forEach((dot) => {
+        if (!(dot instanceof HTMLElement)) return;
+        dot.setAttribute("tabindex", "0");
+        dot.setAttribute("role", "button");
+        dot.setAttribute("aria-label", "Show help");
+      });
+
+      document.querySelectorAll(".export-btn").forEach(btn => {
+        if (!btn.textContent.includes("CSV")) btn.textContent = `CSV ${btn.textContent.trim()}`;
+        btn.addEventListener("click", () => exportVisibleTable(btn.dataset.table));
+      });
+      document.querySelectorAll(".chart-png").forEach(btn => {
+        btn.textContent = `IMG ${btn.textContent.trim()}`;
+        btn.addEventListener("click", () => downloadChartPng(btn.dataset.chart));
+      });
+      document.querySelectorAll(".chart-csv").forEach(btn => {
+        btn.textContent = `CSV ${btn.textContent.trim()}`;
+        btn.addEventListener("click", () => downloadChartCsv(btn.dataset.chart));
+      });
+
+      document.addEventListener("click", (ev) => {
+        const target = ev.target;
+        if (!(target instanceof HTMLElement)) return;
+        const helpDot = target.closest(".help-dot");
+        if (helpDot) {
+          const wrap = helpDot.closest(".help-wrap");
+          if (wrap instanceof HTMLElement) wrap.classList.toggle("open");
+          return;
+        }
+        document.querySelectorAll(".help-wrap.open").forEach(node => {
+          if (!(node instanceof HTMLElement)) return;
+          if (!node.contains(target)) node.classList.remove("open");
+        });
+        const customerBtn = target.closest(".customer-link");
+        if (customerBtn && currentData) {
+          const c = customerBtn.getAttribute("data-customer");
+          if (c) openDrawer(c, currentData);
+          return;
+        }
+        if (!el.drawer.classList.contains("translate-x-full") && !el.drawer.contains(target)) {
+          closeDrawer();
+        }
+        const th = target.closest(".sort-th");
+        if (th) {
+          if (target.closest(".col-resize-handle")) return;
+          if (Date.now() - lastResizeAt < 250) return;
+          const tableId = th.getAttribute("data-table");
+          const key = th.getAttribute("data-key");
+          if (!tableId || !key) return;
+          tableUiState[tableId] ||= { sortKey: key, sortDir: "asc", colWidths: {} };
+          if (tableUiState[tableId].sortKey === key) tableUiState[tableId].sortDir = tableUiState[tableId].sortDir === "asc" ? "desc" : "asc";
+          else { tableUiState[tableId].sortKey = key; tableUiState[tableId].sortDir = "asc"; }
+          saveTablesState();
+          renderAll(currentData);
+        }
+      });
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") {
+          closeDrawer();
+          setFocusedPanel(null);
+          document.querySelectorAll(".help-wrap.open").forEach(node => node.classList.remove("open"));
+        }
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        const target = ev.target;
+        if (!(target instanceof HTMLElement)) return;
+        const helpDot = target.closest(".help-dot");
+        if (!helpDot) return;
+        ev.preventDefault();
+        const wrap = helpDot.closest(".help-wrap");
+        if (wrap instanceof HTMLElement) wrap.classList.toggle("open");
+      });
+
+      document.addEventListener("mousedown", (ev) => {
+        const target = ev.target;
+        if (!(target instanceof HTMLElement)) return;
+        const handle = target.closest(".col-resize-handle");
+        if (!handle) return;
+        const tableId = handle.getAttribute("data-table");
+        const colIdx = Number(handle.getAttribute("data-col-idx"));
+        if (!tableId || !Number.isFinite(colIdx)) return;
+        const th = handle.closest("th");
+        if (!(th instanceof HTMLElement)) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        tableUiState[tableId] ||= { sortKey: "", sortDir: "asc", colWidths: {} };
+        activeResize = { tableId, colIdx, startX: ev.clientX, startWidth: th.getBoundingClientRect().width };
+        document.body.classList.add("resizing");
+      });
+
+      document.addEventListener("mousemove", (ev) => {
+        if (!activeResize) return;
+        const w = Math.max(80, Math.round(activeResize.startWidth + (ev.clientX - activeResize.startX)));
+        const t = tableUiState[activeResize.tableId];
+        t.colWidths[activeResize.colIdx] = w;
+        const container = document.getElementById(activeResize.tableId);
+        if (!container) return;
+        const cols = container.querySelectorAll("col");
+        const col = cols[activeResize.colIdx];
+        if (col) col.style.width = `${w}px`;
+        const idx = activeResize.colIdx + 1;
+        container.querySelectorAll(`th:nth-child(${idx}), td:nth-child(${idx})`).forEach(cell => {
+          if (cell instanceof HTMLElement) { cell.style.width = `${w}px`; cell.style.maxWidth = `${w}px`; }
+        });
+      });
+
+      document.addEventListener("mouseup", () => {
+        if (activeResize) { lastResizeAt = Date.now(); saveTablesState(); }
+        activeResize = null;
+        document.body.classList.remove("resizing");
+      });
+      window.addEventListener("blur", () => {
+        activeResize = null;
+        document.body.classList.remove("resizing");
+      });
+      el.panelFocusBackdrop?.addEventListener("click", () => setFocusedPanel(null));
+    }
+
+    async function init() {
+      try {
+        loadPersistedState();
+        readUrlState();
+        const entries = await Promise.all(
+          Object.entries(FILES).map(async ([k, file]) => [k, await loadCsv(file)])
+        );
+        const raw = Object.fromEntries(entries);
+        applyFreshnessBadge();
+        const data = parseData(raw);
+        renderCoverageCard(data);
+        currentData = data;
+        el.lastLoaded.textContent = `Last loaded: ${new Date().toLocaleString()}`;
+        bindEvents(data);
+        renderAll(data);
+        initPanelControls();
+        document.getElementById("loadingOverlay")?.remove();
+      } catch (err) {
+        document.getElementById("loadingOverlay")?.remove();
+        renderError(err.message || String(err));
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

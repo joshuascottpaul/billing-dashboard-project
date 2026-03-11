@@ -1,0 +1,233 @@
+version: 1
+metadata:
+  repo: "<repo-name>"
+  generated_tasks_md: "TASKS.md"
+  owners:
+    orchestrator-agent: "@orchestrator"
+    qa-agent: "@qa"
+    review-agent: "@review"
+    release-agent: "@release"
+    homebrew-agent: "@homebrew"
+  status_enum: [todo, in_progress, blocked, done]
+  release_impact_enum: [none, app, homebrew]
+  priority_enum: [P0, P1, P2, P3]
+  last_updated: "2026-03-10"
+
+schema:
+  required_task_fields:
+    - id
+    - title
+    - owner
+    - status
+    - priority
+    - depends_on
+    - inputs
+    - output
+    - acceptance_criteria
+    - test_plan
+    - commit_plan
+    - release_impact
+    - reviewer
+    - evidence_links
+    - rollback_plan
+    - telemetry
+  rules:
+    - "id must match ^T-[0-9]{3,}$"
+    - "status must be one of metadata.status_enum"
+    - "release_impact must be one of metadata.release_impact_enum"
+    - "owner and reviewer must differ"
+    - "tasks with release_impact=homebrew require a non-empty homebrew section"
+
+orchestration:
+  dag_mode: true
+  max_parallel_tasks: 3
+  retry_policy:
+    max_retries: 2
+    backoff: "exponential"
+    timeout_minutes: 60
+  completion_gate:
+    require_tests_passing: true
+    require_reviewer_approval: true
+    require_evidence_links: true
+
+tasks:
+  - id: "T-001"
+    title: "Define baseline DORA instrumentation"
+    owner: "orchestrator-agent"
+    reviewer: "qa-agent"
+    status: "done"
+    priority: "P1"
+    depends_on: []
+    inputs:
+      - "OUTCOMES.md"
+      - "RELEASE.md"
+      - "TESTING.md"
+    output: "Metric pipeline spec with data source mappings"
+    acceptance_criteria:
+      - "All four DORA metrics have explicit data sources"
+      - "Calculation query exists for each metric"
+      - "Weekly reporting owner and cadence confirmed"
+    test_plan:
+      - "Validate sample week computes all metrics without null errors"
+    commit_plan:
+      type: "docs"
+      scope: "outcomes"
+      subject: "define baseline DORA instrumentation"
+    release_impact: "none"
+    evidence_links:
+      - "OUTCOMES.md"
+    rollback_plan: "Revert metrics section to prior baseline if calculations are invalid"
+    telemetry:
+      - "dora.pipeline.health"
+      - "dora.snapshot.generated"
+
+  - id: "T-002"
+    title: "Implement tasks.yaml to TASKS.md generator"
+    owner: "backend-agent"
+    reviewer: "review-agent"
+    status: "done"
+    priority: "P1"
+    depends_on: ["T-001"]
+    inputs:
+      - "tasks.yaml"
+      - "CONTRIBUTING.md"
+    output: "Script that renders markdown task board from tasks.yaml"
+    acceptance_criteria:
+      - "Generator produces deterministic TASKS.md ordering"
+      - "Generated file includes owner, deps, status, reviewer"
+      - "CI fails if TASKS.md is out of sync"
+    test_plan:
+      - "Unit tests for schema parsing and markdown rendering"
+      - "Golden file test for stable output"
+    commit_plan:
+      type: "feat"
+      scope: "orchestration"
+      subject: "add tasks board generator"
+    release_impact: "app"
+    evidence_links: []
+    rollback_plan: "Disable sync check and keep manual TASKS.md editing temporarily"
+    telemetry:
+      - "tasks.generator.run"
+      - "tasks.generator.drift_detected"
+
+  - id: "T-003"
+    title: "Automate Homebrew tap update on release"
+    owner: "homebrew-agent"
+    reviewer: "release-agent"
+    status: "todo"
+    priority: "P0"
+    depends_on: ["T-002"]
+    inputs:
+      - "RELEASE.md"
+      - "Formula/<formula>.rb"
+    output: "Release automation that opens/updates tap PR and validates brew install"
+    acceptance_criteria:
+      - "On tag, formula version/url/sha256 update PR is created automatically"
+      - "CI runs brew audit + clean build-from-source install + smoke test"
+      - "If local install exists, local upgrade + smoke test is executed"
+    test_plan:
+      - "Dry run release in staging tag"
+      - "Verify failure path blocks merge on audit/install errors"
+    commit_plan:
+      type: "ci"
+      scope: "release"
+      subject: "automate homebrew tap updates on release"
+    release_impact: "homebrew"
+    evidence_links: []
+    rollback_plan: "Disable auto-merge, switch to manual tap PR approval"
+    telemetry:
+      - "release.tag.detected"
+      - "homebrew.pr.opened"
+      - "homebrew.validation.passed"
+    homebrew:
+      formula: "<formula>"
+      tap_repo: "<org>/<homebrew-tap-repo>"
+      smoke_command: "<formula> --version"
+      local_upgrade_when_installed: true
+
+  - id: "T-004"
+    title: "Harden billing schema drift checks"
+    owner: "qa-agent"
+    reviewer: "review-agent"
+    status: "todo"
+    priority: "P1"
+    depends_on: ["T-002"]
+    inputs:
+      - "analysis/01_ingest.sql"
+      - "analysis/README.md"
+    output: "Pre-run schema validation with actionable error messages"
+    acceptance_criteria:
+      - "Run fails fast when required columns are missing"
+      - "Error output lists missing columns and expected names"
+      - "README includes schema drift remediation steps"
+    test_plan:
+      - "Simulate missing/renamed columns and verify deterministic failure"
+    commit_plan:
+      type: "feat"
+      scope: "qa"
+      subject: "add schema drift guardrails for billing pipeline"
+    release_impact: "none"
+    evidence_links: []
+    rollback_plan: "Disable strict schema gate and run with warning-only mode"
+    telemetry:
+      - "schema.validation.run"
+      - "schema.validation.failed"
+
+  - id: "T-005"
+    title: "Automate docs refresh after pipeline changes"
+    owner: "orchestrator-agent"
+    reviewer: "review-agent"
+    status: "done"
+    priority: "P2"
+    depends_on: ["T-002"]
+    inputs:
+      - "OVERVIEW.MD"
+      - "OUTCOMES.md"
+      - "analysis/README.md"
+    output: "Documentation update checklist and CI reminder for stale docs"
+    acceptance_criteria:
+      - "Pipeline PR template includes docs impact section"
+      - "README and OVERVIEW are reviewed in every analysis logic change"
+      - "OUTCOMES metric-change log updated when instrumentation changes"
+    test_plan:
+      - "Open a sample change and verify docs checklist appears in review flow"
+    commit_plan:
+      type: "docs"
+      scope: "governance"
+      subject: "enforce documentation refresh workflow"
+    release_impact: "none"
+    evidence_links: []
+    rollback_plan: "Temporarily remove CI reminder if it blocks urgent hotfixes"
+    telemetry:
+      - "docs.checklist.present"
+      - "docs.update.completed"
+
+  - id: "T-006"
+    title: "Maintain dashboard glossary and strategic alignment checks"
+    owner: "orchestrator-agent"
+    reviewer: "qa-agent"
+    status: "done"
+    priority: "P1"
+    depends_on: ["T-005"]
+    inputs:
+      - "dashboard/index.html"
+      - "dashboard/README.md"
+      - "STRATEGIC_INTENT.md"
+      - "OUTCOMES.md"
+    output: "Versioned glossary governance and strategic-fit review step for dashboard changes"
+    acceptance_criteria:
+      - "Every new KPI/chart/table has tooltip help text and glossary entry"
+      - "Dashboard README reflects active help model"
+      - "Major metric additions include strategic intent and outcomes impact note"
+    test_plan:
+      - "Review one dashboard change PR and verify glossary + strategic sections are updated"
+    commit_plan:
+      type: "docs"
+      scope: "strategy"
+      subject: "enforce dashboard help and strategic alignment workflow"
+    release_impact: "none"
+    evidence_links: []
+    rollback_plan: "Temporarily relax mandatory glossary checks for urgent fixes"
+    telemetry:
+      - "dashboard.glossary.updated"
+      - "strategy.alignment.checked"

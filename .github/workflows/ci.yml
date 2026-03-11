@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================
+  # Task Generator Sync Check
+  # ===========================================
+  tasks-sync:
+    name: Tasks Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Check TASKS.md sync
+        run: |
+          python scripts/generate_tasks.py --check
+        shell: bash
+
+  # ===========================================
+  # Task Generator Unit Tests
+  # ===========================================
+  tasks-tests:
+    name: Task Generator Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run unit tests
+        run: |
+          python tests/test_tasks_generator.py
+        shell: bash
+
+  # ===========================================
+  # Analytics Pipeline Test
+  # ===========================================
+  analytics-pipeline:
+    name: Analytics Pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas openpyxl duckdb
+
+      - name: Run analytics pipeline
+        run: |
+          bash analysis/run.sh
+        shell: bash
+
+      - name: Verify outputs
+        run: |
+          # Check that expected output files were created
+          expected_files=(
+            "analysis/out/yearly_summary.csv"
+            "analysis/out/monthly_summary.csv"
+            "analysis/out/data_quality_report.md"
+          )
+          for file in "${expected_files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "Error: Expected output file missing: $file"
+              exit 1
+            fi
+          done
+          echo "All expected output files present"
+        shell: bash
+
+      - name: Upload data quality report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: data-quality-report
+          path: analysis/out/data_quality_report.md
+          retention-days: 7
+
+  # ===========================================
+  # Dashboard E2E Tests
+  # ===========================================
+  dashboard-e2e:
+    name: Dashboard E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright browsers
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+        shell: bash
+
+      - name: Run E2E tests
+        run: |
+          npm run test:e2e
+        shell: bash
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: 7
+
+  # ===========================================
+  # Schema Validation (Run on Excel changes)
+  # ===========================================
+  schema-validation:
+    name: Schema Validation
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.changed_files, 'nc-2002-2026.xlsx')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas openpyxl
+
+      - name: Validate schema
+        run: |
+          # This will fail fast if schema is invalid
+          python -c "
+          import pandas as pd
+          df = pd.read_excel('nc-2002-2026.xlsx', sheet_name=0)
+          required = [
+              'Invoice Date', 'Statement Item Type', 'Invoice Grand Total',
+              'Amount of Payment', 'Billing Company', 'Billing Contact',
+              'Billing Contact Address Email', 'Currency', 'Billing Country'
+          ]
+          missing = [c for c in required if c not in df.columns]
+          if missing:
+              print(f'ERROR: Missing columns: {missing}')
+              exit(1)
+          print(f'OK: All {len(required)} required columns present')
+          "
+        shell: bash
